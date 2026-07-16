@@ -7,6 +7,10 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 CLIPROXY_VERSION="7.2.80"
 KEEPER_VERSION="1.13.2"
 MANAGEMENT_VERSION="1.18.3"
+DEPLOY_RELEASE_VERSION="1.2.0"
+USAGE_UI_VERSION="1.13.2-plain-zh.1"
+USAGE_UI_SHA256="ce7468c31f955956300d3b668909ce84a98864ed804aeff6da3db2c5a974b4aa"
+USAGE_UI_ROOT="/opt/codex-relay-usage-ui"
 DEFAULT_PORT="8317"
 DEFAULT_TZ="Asia/Shanghai"
 INTERNAL_PORTS=(18080 18081 18317)
@@ -171,6 +175,7 @@ if [[ "$REPAIR_MODE" == "0" ]]; then
     /etc/nginx/sites-enabled/codex-relay \
     /opt/cliproxyapi \
     /opt/cpa-usage-keeper \
+    "$USAGE_UI_ROOT" \
     /var/lib/cliproxyapi \
     /var/lib/cpa-usage-keeper \
     /root/codex-relay-credentials.txt; do
@@ -347,7 +352,10 @@ else
     die "Existing cpausage account does not match the required restricted service account."
 fi
 
-install -d -o root -g root -m 0755 /opt/cliproxyapi /opt/cpa-usage-keeper
+install -d -o root -g root -m 0755 \
+  /opt/cliproxyapi \
+  /opt/cpa-usage-keeper \
+  "$USAGE_UI_ROOT"
 install -d -o root -g cliproxyapi -m 0750 /etc/cliproxyapi
 install -d -o root -g cpausage -m 0750 /etc/cpa-usage-keeper
 install -d -o cliproxyapi -g cliproxyapi -m 0700 \
@@ -360,6 +368,8 @@ install -d -o cpausage -g cpausage -m 0700 /var/lib/cpa-usage-keeper
 
 CLIPROXY_ASSET="CLIProxyAPI_${CLIPROXY_VERSION}_linux_${CLIPROXY_ARCH}_no-plugin.tar.gz"
 KEEPER_ASSET="cpa-usage-keeper_v${KEEPER_VERSION}_linux_${KEEPER_ARCH}.tar.gz"
+USAGE_UI_ASSET="cpa-usage-ui_${USAGE_UI_VERSION}.tar.gz"
+USAGE_UI_PACKAGE="${USAGE_UI_ASSET%.tar.gz}"
 
 log "Downloading and verifying CLIProxyAPI v${CLIPROXY_VERSION}"
 curl --proto '=https' --tlsv1.2 -fL \
@@ -383,6 +393,39 @@ tar -xzf "$WORK_DIR/$KEEPER_ASSET" -C "$WORK_DIR/keeper"
 KEEPER_BIN="$(find "$WORK_DIR/keeper" -type f -name cpa-usage-keeper -print -quit)"
 [[ -n "$KEEPER_BIN" ]] || die "CPA Usage Keeper binary was not found in the release archive."
 install -o root -g root -m 0755 "$KEEPER_BIN" /opt/cpa-usage-keeper/cpa-usage-keeper
+
+log "Downloading and verifying the plain-Chinese usage dashboard ${USAGE_UI_VERSION}"
+curl --proto '=https' --tlsv1.2 -fL \
+  --connect-timeout 15 --max-time 600 --retry 3 --retry-delay 2 --retry-all-errors \
+  "https://github.com/2004liangle/codex-oauth-relay-deploy/releases/download/v${DEPLOY_RELEASE_VERSION}/${USAGE_UI_ASSET}" \
+  -o "$WORK_DIR/$USAGE_UI_ASSET"
+printf '%s  %s\n' "$USAGE_UI_SHA256" "$WORK_DIR/$USAGE_UI_ASSET" | sha256sum -c -
+if tar -tzf "$WORK_DIR/$USAGE_UI_ASSET" | awk '
+  /^\// || /(^|\/)\.\.($|\/)/ || /\\/ { bad = 1 }
+  END { exit bad ? 0 : 1 }
+'; then
+  die "The usage dashboard archive contains an unsafe path."
+fi
+mkdir "$WORK_DIR/usage-ui"
+tar --extract --gzip --file "$WORK_DIR/$USAGE_UI_ASSET" \
+  --directory "$WORK_DIR/usage-ui" --no-same-owner --no-same-permissions
+USAGE_UI_SOURCE="$WORK_DIR/usage-ui/$USAGE_UI_PACKAGE"
+[[ -f "$USAGE_UI_SOURCE/usage/index.html" ]] || \
+  die "The usage dashboard archive does not contain usage/index.html."
+[[ -d "$USAGE_UI_SOURCE/usage/assets" ]] || \
+  die "The usage dashboard archive does not contain usage/assets."
+if find "$USAGE_UI_SOURCE" \( -type l -o \( ! -type f ! -type d \) \) -print -quit | grep -q .; then
+  die "The usage dashboard archive contains an unsupported file type."
+fi
+[[ -n "$(find "$USAGE_UI_SOURCE/usage/assets" -type f -print -quit)" ]] || \
+  die "The usage dashboard archive contains no static assets."
+USAGE_UI_TARGET="$USAGE_UI_ROOT/$USAGE_UI_VERSION"
+install -d -o root -g root -m 0755 "$USAGE_UI_TARGET"
+cp -a "$USAGE_UI_SOURCE/." "$USAGE_UI_TARGET/"
+chown -R root:root "$USAGE_UI_TARGET"
+find "$USAGE_UI_TARGET" -type d -exec chmod 0755 {} +
+find "$USAGE_UI_TARGET" -type f -exec chmod 0644 {} +
+ln -sfn "$USAGE_UI_TARGET" "$USAGE_UI_ROOT/current"
 
 log "Downloading and verifying the CLIProxy management panel v${MANAGEMENT_VERSION}"
 curl --proto '=https' --tlsv1.2 -fL \
@@ -720,7 +763,7 @@ server {
         return 308 /usage/;
     }
 
-    location ^~ /usage/ {
+    location ^~ /usage/api/ {
         proxy_pass http://127.0.0.1:18081;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
@@ -729,6 +772,55 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_buffering off;
         proxy_read_timeout 300s;
+    }
+
+    location = /usage/healthz {
+        proxy_pass http://127.0.0.1:18081;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+    }
+
+    location = /usage/ {
+        root $USAGE_UI_ROOT/current;
+        index index.html;
+        try_files \$uri \$uri/ =404;
+        add_header Cache-Control "no-store" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+        add_header Content-Security-Policy "frame-ancestors 'self'" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    location = /usage/index.html {
+        root $USAGE_UI_ROOT/current;
+        try_files /usage/index.html =404;
+        add_header Cache-Control "no-store" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+        add_header Content-Security-Policy "frame-ancestors 'self'" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    location = /usage/key-overview {
+        root $USAGE_UI_ROOT/current;
+        try_files /usage/index.html =404;
+        add_header Cache-Control "no-store" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+        add_header Content-Security-Policy "frame-ancestors 'self'" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    location ^~ /usage/assets/ {
+        root $USAGE_UI_ROOT/current;
+        try_files \$uri =404;
+        access_log off;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    location ^~ /usage/ {
+        return 404;
     }
 
     location = /v1/models {
@@ -869,6 +961,17 @@ done
 
 LOCAL_URL="http://127.0.0.1:$PUBLIC_PORT"
 wait_for_http 200 "$LOCAL_URL/usage/" || die "The usage dashboard did not become ready."
+curl --noproxy '*' -fsS "$LOCAL_URL/usage/" | \
+  grep -Fq '<title>Codex 中转使用情况</title>' || \
+  die "The plain-Chinese usage dashboard is not being served."
+wait_for_http 200 "$LOCAL_URL/usage/key-overview" || \
+  die "The API-key usage overview page did not become ready."
+wait_for_http 200 "$LOCAL_URL/usage/healthz" || \
+  die "The usage dashboard health endpoint did not become ready."
+wait_for_http 401 "$LOCAL_URL/usage/api/v1/status" || \
+  die "The usage dashboard API authentication is not enforced."
+wait_for_http 404 "$LOCAL_URL/usage/assets/not-a-real-asset.js" || \
+  die "A missing usage dashboard asset does not return 404."
 wait_for_http 200 "$LOCAL_URL/management.html" || die "The management page did not become ready."
 wait_for_http 401 "$LOCAL_URL/v0/management/config" || die "Management authentication is not enforced."
 wait_for_http 405 "$LOCAL_URL/v0/management/config" \

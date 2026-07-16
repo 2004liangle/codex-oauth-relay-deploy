@@ -1,0 +1,2158 @@
+diff --git a/web/index.html b/web/index.html
+index 932abd79f1045f1f8aaa9f24e606421a798b7cbd..0c8e7daee2b7153246226304d85ed8072de9e49c 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -1,10 +1,19 @@
+ <!doctype html>
+-<html lang="en">
++<html lang="zh-CN">
+   <head>
+     <meta charset="UTF-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <title>CPA USAGE KEEPER</title>
++    <base href="__APP_BASE_PATH__/" />
++    <title>Codex 中转使用情况</title>
+     <script>
++      try {
++        const languageKey = "cpa-usage-keeper-language";
++        if (!window.localStorage.getItem(languageKey)) {
++          window.localStorage.setItem(languageKey, "zh");
++        }
++      } catch {
++        // Continue with the application's built-in fallback when storage is unavailable.
++      }
+       window.__APP_BASE_PATH__ = "__APP_BASE_PATH__";
+     </script>
+   </head>
+diff --git a/web/src/components/usage/OverviewRealtimePanel.logic.test.tsx b/web/src/components/usage/OverviewRealtimePanel.logic.test.tsx
+index 4ea2de5c1827e3daa82a155108cd4758098b1298..d1c58962053abb7e1a75cf59e051981321e582b9 100644
+--- a/web/src/components/usage/OverviewRealtimePanel.logic.test.tsx
++++ b/web/src/components/usage/OverviewRealtimePanel.logic.test.tsx
+@@ -1,6 +1,6 @@
+ import React from 'react';
+ import { renderToStaticMarkup } from 'react-dom/server';
+-import { afterEach, describe, expect, it, vi } from 'vitest';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import type { ChartData, ChartOptions } from 'chart.js';
+ import type { OverviewRealtimeBlock } from '@/lib/types';
+ import i18n from '@/i18n';
+@@ -27,7 +27,9 @@ vi.mock('react-i18next', () => ({
+     init: () => {},
+   },
+   useTranslation: () => ({
+-    t: (key: string) => key,
++    t: (key: string, options?: { value?: string }) => (
++      key === 'usage_stats.overview_realtime_per_minute_value' ? `${options?.value ?? ''}/min` : key
++    ),
+   }),
+ }));
+
+@@ -93,6 +95,10 @@ const realtimeWithProjectOffset: OverviewRealtimeBlock = {
+ };
+
+ describe('OverviewRealtimePanel', () => {
++  beforeEach(async () => {
++    await i18n.changeLanguage('en');
++  });
++
+   afterEach(async () => {
+     chartCapture.lineCalls = [];
+     chartCapture.chartCalls = [];
+@@ -509,7 +515,7 @@ describe('OverviewRealtimePanel', () => {
+     ]);
+   });
+
+-  it('keeps realtime response duration units fixed in non-English locales', async () => {
++  it('uses localized realtime response duration units in Chinese', async () => {
+     await i18n.changeLanguage('zh-CN');
+
+     const formattedRealtime: OverviewRealtimeBlock = {
+@@ -548,10 +554,10 @@ describe('OverviewRealtimePanel', () => {
+     );
+     const responseYAxis = chartCapture.chartCalls[1].options.scales?.y as { ticks?: { callback?: (value: string | number) => string } };
+
+-    expect(html).toContain('2.5s');
+-    expect(html).not.toContain('2.5秒');
+-    expect(responseYAxis.ticks?.callback?.(900)).toBe('900ms');
+-    expect(responseYAxis.ticks?.callback?.(2500)).toBe('2.5s');
++    expect(html).toContain('2.5秒');
++    expect(html).not.toContain('2.5s');
++    expect(responseYAxis.ticks?.callback?.(900)).toBe('900毫秒');
++    expect(responseYAxis.ticks?.callback?.(2500)).toBe('2.5秒');
+   });
+
+   it('shows only the Models current-usage dimension for key overview', () => {
+diff --git a/web/src/components/usage/OverviewRealtimePanel.tsx b/web/src/components/usage/OverviewRealtimePanel.tsx
+index 185743b6a0c27392abd5d15f2f902ec97bbc357f..0d893febec3b74deab0988e572a7888ec332d89a 100644
+--- a/web/src/components/usage/OverviewRealtimePanel.tsx
++++ b/web/src/components/usage/OverviewRealtimePanel.tsx
+@@ -61,14 +61,6 @@ const CHART_COLORS = {
+   cache: '#14b8a6',
+ } as const;
+
+-const REALTIME_DURATION_UNITS = {
+-  d: 'd',
+-  h: 'h',
+-  m: 'm',
+-  s: 's',
+-  ms: 'ms',
+-} as const;
+-
+ const emptyRealtime = (window: OverviewRealtimeWindow): OverviewRealtimeBlock => ({
+   window,
+   bucket_seconds: window === '30m' ? 60 : window === '60m' ? 120 : 30,
+@@ -143,12 +135,8 @@ const safeNumber = (value: unknown): number => {
+   return Number.isFinite(parsed) ? parsed : 0;
+ };
+
+-const formatRealtimeTokenRate = (value: number) => `${formatCompactNumber(value)}/min`;
+-
+ const formatRealtimeDuration = (value: number) => formatDurationMs(value, {
+   maxUnits: 2,
+-  locale: 'en-US',
+-  unitLabels: REALTIME_DURATION_UNITS,
+ });
+
+ const latestNumber = (values: Array<number | null>): number | null => {
+@@ -623,6 +611,9 @@ export function OverviewRealtimePanel({ realtime, loading, error, window, onWind
+   const averageLabel = t('usage_stats.overview_realtime_average');
+   const trendLabel = t('usage_stats.overview_realtime_trend');
+   const rollingMetricHint = t('usage_stats.overview_realtime_rolling_metric_hint');
++  const formatRealtimeTokenRate = (value: number) => t('usage_stats.overview_realtime_per_minute_value', {
++    value: formatCompactNumber(value),
++  });
+
+   const tokenChartData = useMemo(() => buildSingleLineData(labels, t('usage_stats.overview_realtime_tpm'), tokenValues, CHART_COLORS.token), [labels, t, tokenValues]);
+   const requestChartData = useMemo(() => buildSingleLineData(labels, t('usage_stats.overview_realtime_rpm'), requestValues, CHART_COLORS.request), [labels, requestValues, t]);
+@@ -677,7 +668,7 @@ export function OverviewRealtimePanel({ realtime, loading, error, window, onWind
+               onClick={() => onWindowChange(option)}
+               aria-pressed={window === option}
+             >
+-              {option}
++              {t(`usage_stats.overview_realtime_window_${option}`)}
+             </button>
+           ))}
+         </div>
+diff --git a/web/src/components/usage/PriceSettingsCard.tsx b/web/src/components/usage/PriceSettingsCard.tsx
+index 8daa876aec0b65c30e8ddb532b3aab6dc9c16e39..5e7703e0b9ac8bc6da483944314bec23c0e47d71 100644
+--- a/web/src/components/usage/PriceSettingsCard.tsx
++++ b/web/src/components/usage/PriceSettingsCard.tsx
+@@ -1,5 +1,6 @@
+ import { useState, useMemo } from 'react';
+ import { useTranslation } from 'react-i18next';
++import type { TFunction } from 'i18next';
+ import { Card } from '@/components/ui/Card';
+ import { Button } from '@/components/ui/Button';
+ import { Input } from '@/components/ui/Input';
+@@ -15,6 +16,33 @@ const formatDisplayName = (value: string): string => {
+   return normalized;
+ };
+
++const formatPriceFieldLabel = (t: TFunction, labelKey: string): string => t(
++  'usage_stats.model_price_field_with_unit',
++  {
++    label: t(labelKey),
++    unit: t('usage_stats.model_price_unit_per_million'),
++  },
++);
++
++const formatPricePerMillion = (t: TFunction, value: number): string => t(
++  'usage_stats.model_price_value_per_million',
++  { value: `$${value.toFixed(4)}` },
++);
++
++const PRICING_MATCH_TYPE_LABEL_KEYS: Record<string, string> = {
++  exact: 'usage_stats.model_price_match_exact',
++  index_exact: 'usage_stats.model_price_match_exact',
++  index_suffix: 'usage_stats.model_price_match_suffix',
++  index_normalized: 'usage_stats.model_price_match_normalized',
++  index_normalized_suffix: 'usage_stats.model_price_match_normalized_suffix',
++};
++
++export const formatPricingMatchType = (t: TFunction, rawMatchType: string): string => {
++  const value = rawMatchType.trim();
++  const labelKey = PRICING_MATCH_TYPE_LABEL_KEYS[value.toLowerCase()];
++  return labelKey ? t(labelKey) : t('usage_stats.model_price_match_other', { value });
++};
++
+ const modelNameCollator = new Intl.Collator('en', {
+   numeric: true,
+   sensitivity: 'base',
+@@ -601,7 +629,7 @@ export function PriceSettingsCard({
+                     />
+                   </div>
+                   <div className={styles.formField}>
+-                    <label>{t('usage_stats.model_price_prompt')} ($/1M)</label>
++                    <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_prompt')}</label>
+                     <Input
+                       type="number"
+                       value={promptPrice}
+@@ -613,7 +641,7 @@ export function PriceSettingsCard({
+                     />
+                   </div>
+                   <div className={styles.formField}>
+-                    <label>{t('usage_stats.model_price_completion')} ($/1M)</label>
++                    <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_completion')}</label>
+                     <Input
+                       type="number"
+                       value={completionPrice}
+@@ -625,7 +653,7 @@ export function PriceSettingsCard({
+                     />
+                   </div>
+                   <div className={styles.formField}>
+-                    <label>{t('usage_stats.model_price_cache_read')} ($/1M)</label>
++                    <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_cache_read')}</label>
+                     <Input
+                       type="number"
+                       value={cacheReadPrice}
+@@ -637,7 +665,7 @@ export function PriceSettingsCard({
+                     />
+                   </div>
+                   <div className={styles.formField}>
+-                    <label>{t('usage_stats.model_price_cache_write')} ($/1M)</label>
++                    <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_cache_write')}</label>
+                     <Input
+                       type="number"
+                       value={cacheWritePrice}
+@@ -680,16 +708,16 @@ export function PriceSettingsCard({
+                               {t('usage_stats.model_price_style')}: {t(price.style === 'claude' ? 'usage_stats.model_price_style_claude' : 'usage_stats.model_price_style_openai')}
+                             </span>
+                             <span>
+-                              {t('usage_stats.model_price_prompt')}: ${price.prompt.toFixed(4)}/1M
++                              {t('usage_stats.model_price_prompt')}: {formatPricePerMillion(t, price.prompt)}
+                             </span>
+                             <span>
+-                              {t('usage_stats.model_price_completion')}: ${price.completion.toFixed(4)}/1M
++                              {t('usage_stats.model_price_completion')}: {formatPricePerMillion(t, price.completion)}
+                             </span>
+                             <span>
+-                              {t('usage_stats.model_price_cache_read')}: ${price.cacheRead.toFixed(4)}/1M
++                              {t('usage_stats.model_price_cache_read')}: {formatPricePerMillion(t, price.cacheRead)}
+                             </span>
+                             <span>
+-                              {t('usage_stats.model_price_cache_write')}: ${price.cacheWrite.toFixed(4)}/1M
++                              {t('usage_stats.model_price_cache_write')}: {formatPricePerMillion(t, price.cacheWrite)}
+                             </span>
+                             <span>
+                               {t('usage_stats.model_price_multiplier')}: {priceToInputValue(price.multiplier ?? 1)}
+@@ -746,7 +774,7 @@ export function PriceSettingsCard({
+             />
+           </div>
+           <div className={styles.formField}>
+-            <label>{t('usage_stats.model_price_prompt')} ($/1M)</label>
++            <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_prompt')}</label>
+             <Input
+               type="number"
+               value={editPrompt}
+@@ -758,7 +786,7 @@ export function PriceSettingsCard({
+             />
+           </div>
+           <div className={styles.formField}>
+-            <label>{t('usage_stats.model_price_completion')} ($/1M)</label>
++            <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_completion')}</label>
+             <Input
+               type="number"
+               value={editCompletion}
+@@ -770,7 +798,7 @@ export function PriceSettingsCard({
+             />
+           </div>
+           <div className={styles.formField}>
+-            <label>{t('usage_stats.model_price_cache_read')} ($/1M)</label>
++            <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_cache_read')}</label>
+             <Input
+               type="number"
+               value={editCacheRead}
+@@ -782,7 +810,7 @@ export function PriceSettingsCard({
+             />
+           </div>
+           <div className={styles.formField}>
+-            <label>{t('usage_stats.model_price_cache_write')} ($/1M)</label>
++            <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_cache_write')}</label>
+             <Input
+               type="number"
+               value={editCacheWrite}
+@@ -943,7 +971,7 @@ export function PriceSettingsCard({
+                                 <IconCircleAlert size={13} />
+                               </span>
+                             )}
+-                            <span>{draft.matchType}</span>
++                            <span>{formatPricingMatchType(t, draft.matchType)}</span>
+                             {existing && <span>{t('usage_stats.model_price_sync_existing')}</span>}
+                           </div>
+                         </div>
+@@ -959,7 +987,7 @@ export function PriceSettingsCard({
+                             />
+                           </div>
+                           <div className={styles.formField}>
+-                            <label>{t('usage_stats.model_price_prompt')} ($/1M)</label>
++                            <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_prompt')}</label>
+                             <Input
+                               type="number"
+                               value={draft.prompt}
+@@ -971,7 +999,7 @@ export function PriceSettingsCard({
+                             />
+                           </div>
+                           <div className={styles.formField}>
+-                            <label>{t('usage_stats.model_price_completion')} ($/1M)</label>
++                            <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_completion')}</label>
+                             <Input
+                               type="number"
+                               value={draft.completion}
+@@ -983,7 +1011,7 @@ export function PriceSettingsCard({
+                             />
+                           </div>
+                           <div className={styles.formField}>
+-                            <label>{t('usage_stats.model_price_cache_read')} ($/1M)</label>
++                            <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_cache_read')}</label>
+                             <Input
+                               type="number"
+                               value={draft.cacheRead}
+@@ -995,7 +1023,7 @@ export function PriceSettingsCard({
+                             />
+                           </div>
+                           <div className={styles.formField}>
+-                            <label>{t('usage_stats.model_price_cache_write')} ($/1M)</label>
++                            <label>{formatPriceFieldLabel(t, 'usage_stats.model_price_cache_write')}</label>
+                             <Input
+                               type="number"
+                               value={draft.cacheWrite}
+diff --git a/web/src/components/usage/RequestEventsDetailsCard.test.tsx b/web/src/components/usage/RequestEventsDetailsCard.test.tsx
+index 1df1c9c74ea1e06c6f8a6ad75447d909e3725df5..fb7a8a38c641029992871daf71119895dc1b9d54 100644
+--- a/web/src/components/usage/RequestEventsDetailsCard.test.tsx
++++ b/web/src/components/usage/RequestEventsDetailsCard.test.tsx
+@@ -1,5 +1,5 @@
+ import React from 'react';
+-import { describe, expect, it } from 'vitest';
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+ import { renderToStaticMarkup } from 'react-dom/server';
+ import {
+   RequestEventsDetailsCard,
+@@ -10,6 +10,17 @@ import {
+   type RequestEventColumnId,
+ } from './RequestEventsDetailsCard';
+ import type { UsageEvent } from '@/lib/types';
++import i18n from '@/i18n';
++
++const previousLanguage = i18n.resolvedLanguage || i18n.language;
++
++beforeAll(async () => {
++  await i18n.changeLanguage('en');
++});
++
++afterAll(async () => {
++  await i18n.changeLanguage(previousLanguage);
++});
+
+ const events: UsageEvent[] = [
+   {
+@@ -98,11 +109,11 @@ describe('RequestEventsDetailsCard pagination', () => {
+     expect(html.indexOf('title="Average visible output tokens per second after TTFT">Speed</th>')).toBeLessThan(html.indexOf('>Input</th>'));
+     expect(html).toContain('class="_requestEventsAPIKeyCell_');
+     expect(html).toContain('title="Production Key">Production Key</td>');
+-    expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">medium<\/td>/);
++    expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">Medium<\/td>/);
+     expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">Fast<\/td>/);
+-    expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">SSE<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*" title="\/messages">\/messages<\/td>/);
++    expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">Streaming response \(SSE\)<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*" title="\/messages">\/messages<\/td>/);
+     expect(html.indexOf('>45ms</td>')).toBeLessThan(html.indexOf('>120ms</td>'));
+-    expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">30\.0 t\/s<\/td>/);
++    expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">30\.0 tokens\/s<\/td>/);
+     expect(html).toContain('1 / 6');
+     expect(html).toContain('20');
+     expect(html).toContain('50');
+@@ -130,8 +141,29 @@ describe('RequestEventsDetailsCard pagination', () => {
+     expect(countOccurrences(html, '>Standard</td>')).toBe(2);
+     expect(countOccurrences(html, '>Fast</td>')).toBe(2);
+     expect(html).toContain('>Flex</td>');
+-    expect(html).toMatch(/medium<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td><td class="[^"]*requestEventsNoWrapCell/);
+-    expect(html).toMatch(/medium<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">batch<\/td><td class="[^"]*requestEventsNoWrapCell/);
++    expect(html).toMatch(/Medium<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td><td class="[^"]*requestEventsNoWrapCell/);
++    expect(html).toMatch(/Medium<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">Batch processing<\/td><td class="[^"]*requestEventsNoWrapCell/);
++  });
++
++  it('uses plain Chinese for request transport, batch mode, and unknown reasoning values', async () => {
++    await i18n.changeLanguage('zh');
++    try {
++      const html = renderCard({
++        events: [{
++          ...events[0],
++          reasoning_effort: 'ultra',
++          response_service_tier: 'batch',
++          endpoint: 'POST /v1/messages',
++        }],
++      });
++
++      expect(html).toContain('其他（ultra）');
++      expect(html).toContain('批量处理');
++      expect(html).toContain('流式回复（SSE）');
++      expect(html).not.toContain('>batch</td>');
++    } finally {
++      await i18n.changeLanguage('en');
++    }
+   });
+
+   it('formats timestamps with compact numeric date and time', () => {
+@@ -149,7 +181,7 @@ describe('RequestEventsDetailsCard pagination', () => {
+     });
+
+     expect(html.indexOf('title="Time to First Token">TTFT</th>')).toBeLessThan(html.indexOf('title="Using latency_ms in ms">Latency</th>'));
+-    expect(html).toMatch(/Success<\/span><\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">SSE<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*" title="\/messages">\/messages<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">120ms<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td>/);
++    expect(html).toMatch(/Success<\/span><\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">Streaming response \(SSE\)<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*" title="\/messages">\/messages<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">120ms<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td>/);
+   });
+
+   it('keeps the Latency column visible when latency is missing', () => {
+@@ -167,15 +199,15 @@ describe('RequestEventsDetailsCard pagination', () => {
+       events: [{ ...events[0], ttft_ms: 0, speed_tps: undefined }],
+     });
+
+-    expect(html).toMatch(/Success<\/span><\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">SSE<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*" title="\/messages">\/messages<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">120ms<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td>/);
++    expect(html).toMatch(/Success<\/span><\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">Streaming response \(SSE\)<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*" title="\/messages">\/messages<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">120ms<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td>/);
+   });
+
+-  it('maps GET endpoints to WS and strips the v1 prefix', () => {
++  it('maps GET endpoints to a readable realtime connection label and strips the v1 prefix', () => {
+     const html = renderCard({
+       events: [{ ...events[0], endpoint: 'GET /v1/responses' }],
+     });
+
+-    expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">WS<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*" title="\/responses">\/responses<\/td>/);
++    expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">Realtime connection \(WS\)<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*" title="\/responses">\/responses<\/td>/);
+   });
+
+   it('strips the v1 prefix when endpoint has no request method', () => {
+diff --git a/web/src/components/usage/RequestEventsDetailsCard.tsx b/web/src/components/usage/RequestEventsDetailsCard.tsx
+index b2c964448a05aa46d0f3903a555c13163441a585..fd48c97b851dd925e8c7cbf4b38c34a09709cff6 100644
+--- a/web/src/components/usage/RequestEventsDetailsCard.tsx
++++ b/web/src/components/usage/RequestEventsDetailsCard.tsx
+@@ -12,6 +12,7 @@ import React, {
+ import { createPortal } from 'react-dom';
+ import { useVirtualizer } from '@tanstack/react-virtual';
+ import { useTranslation } from 'react-i18next';
++import type { TFunction } from 'i18next';
+ import { Button } from '@/components/ui/Button';
+ import { Card } from '@/components/ui/Card';
+ import { EmptyState } from '@/components/ui/EmptyState';
+@@ -337,27 +338,55 @@ const formatTTFTMs = (ttftMs: number | null): string => {
+   return formatDurationMs(ttftMs);
+ };
+
+-const formatSpeedTPS = (speedTPS: number | null): string => {
++const formatSpeedTPS = (speedTPS: number | null, t: TFunction): string => {
+   if (speedTPS === null || speedTPS <= 0) {
+     return '-';
+   }
+-  return `${speedTPS.toFixed(1)} t/s`;
++  return t('usage_stats.speed_value', { value: speedTPS.toFixed(1) });
++};
++
++const REASONING_EFFORT_LABEL_KEYS: Record<string, string> = {
++  none: 'usage_stats.reasoning_effort_none',
++  minimal: 'usage_stats.reasoning_effort_minimal',
++  low: 'usage_stats.reasoning_effort_low',
++  medium: 'usage_stats.reasoning_effort_medium',
++  high: 'usage_stats.reasoning_effort_high',
++  xhigh: 'usage_stats.reasoning_effort_xhigh',
++};
++
++const formatReasoningEffort = (rawEffort: unknown, t: TFunction): string => {
++  const value = String(rawEffort ?? '').trim();
++  if (!value) return '-';
++  const labelKey = REASONING_EFFORT_LABEL_KEYS[value.toLowerCase()];
++  return labelKey ? t(labelKey) : t('usage_stats.reasoning_effort_unknown', { value });
+ };
+
+ const REQUEST_SPEED_MODE_LABEL_KEYS: Record<string, string> = {
++  auto: 'usage_stats.speed_mode_standard',
+   default: 'usage_stats.speed_mode_standard',
+   standard: 'usage_stats.speed_mode_standard',
+   priority: 'usage_stats.speed_mode_fast',
+   fast: 'usage_stats.speed_mode_fast',
+   flex: 'usage_stats.speed_mode_flex',
++  batch: 'usage_stats.speed_mode_batch',
+ };
+
+-const formatResponseSpeedMode = (rawMode: unknown, t: (key: string) => string): string => {
++const formatResponseSpeedMode = (rawMode: unknown, t: TFunction): string => {
+   const value = String(rawMode ?? '').trim();
+   if (!value) return '-';
+
+   const labelKey = REQUEST_SPEED_MODE_LABEL_KEYS[value.toLowerCase()];
+-  return labelKey ? t(labelKey) : value;
++  return labelKey ? t(labelKey) : t('usage_stats.speed_mode_unknown', { value });
++};
++
++const REQUEST_TYPE_LABEL_KEYS: Record<string, string> = {
++  sse: 'usage_stats.request_type_sse',
++  ws: 'usage_stats.request_type_ws',
++};
++
++const formatRequestType = (requestType: string, t: TFunction): string => {
++  const labelKey = REQUEST_TYPE_LABEL_KEYS[requestType.toLowerCase()];
++  return labelKey ? t(labelKey) : requestType;
+ };
+
+ const parseRequestEndpoint = (rawEndpoint: unknown): { requestType: string; endpoint: string } => {
+@@ -368,7 +397,7 @@ const parseRequestEndpoint = (rawEndpoint: unknown): { requestType: string; endp
+   const [first, ...rest] = raw.split(' ');
+   const upperMethod = first.toUpperCase();
+   const hasMethod = ['GET', 'POST'].includes(upperMethod);
+-  const requestType = upperMethod === 'POST' ? 'SSE' : upperMethod === 'GET' ? 'WS' : '-';
++  const requestType = upperMethod === 'POST' ? 'sse' : upperMethod === 'GET' ? 'ws' : '-';
+   const path = hasMethod ? rest.join(' ').trim() : raw;
+   const normalizedPath = path.startsWith('/v1/') ? path.slice(3) : path === '/v1' ? '/' : path;
+   return { requestType, endpoint: normalizedPath || '-' };
+@@ -939,7 +968,7 @@ export function RequestEventsDetailsCard({
+       const model = modelValue || '-';
+       const modelAliasValue = String(event.model_alias ?? '').trim();
+       const modelAlias = modelAliasValue && modelAliasValue !== modelValue ? modelAliasValue : '-';
+-      const reasoningEffort = String(event.reasoning_effort ?? '').trim() || '-';
++      const reasoningEffort = formatReasoningEffort(event.reasoning_effort, t);
+       const speedMode = formatResponseSpeedMode(event.response_service_tier, t);
+       const endpointFields = parseRequestEndpoint(event.endpoint);
+       const inputTokens = Math.max(toNumber(event.tokens?.input_tokens), 0);
+@@ -967,7 +996,7 @@ export function RequestEventsDetailsCard({
+         modelAlias,
+         reasoningEffort,
+         speedMode,
+-        requestType: endpointFields.requestType,
++        requestType: formatRequestType(endpointFields.requestType, t),
+         endpoint: endpointFields.endpoint,
+         sourceRaw: sourceRaw || '-',
+         source,
+@@ -1198,7 +1227,7 @@ export function RequestEventsDetailsCard({
+         id: 'speed',
+         label: t('usage_stats.speed'),
+         header: <th className={styles.requestEventsNoWrapCell} title={speedHint}>{t('usage_stats.speed')}</th>,
+-        renderCell: (row) => <td className={styles.requestEventsNoWrapCell}>{formatSpeedTPS(row.speedTPS)}</td>,
++        renderCell: (row) => <td className={styles.requestEventsNoWrapCell}>{formatSpeedTPS(row.speedTPS, t)}</td>,
+       },
+       {
+         id: 'input_tokens',
+diff --git a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
+index 8714d4bf906690398db4d329e5334a5c6bc0e41c..3361b892755d14ce92dfa6461e80458b27725ea6 100644
+--- a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
++++ b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
+@@ -1703,7 +1703,51 @@ export function formatQuotaResetLabel(resetAt: string): string {
+   return `${month}/${day} ${hour}:${minute}`
+ }
+
+-export function formatQuotaResetDuration(resetAt: string): string {
++const QUOTA_LABEL_EXACT_KEYS: Record<string, string> = {
++  '5h': 'usage_stats.credentials_quota_label_5h',
++  Weekly: 'usage_stats.credentials_quota_label_weekly',
++  Monthly: 'usage_stats.credentials_quota_label_monthly',
++  Primary: 'usage_stats.credentials_quota_label_primary',
++  Secondary: 'usage_stats.credentials_quota_label_secondary',
++  'Code Review': 'usage_stats.credentials_quota_label_code_review',
++  'Monthly Spend': 'usage_stats.credentials_quota_label_monthly_spend',
++  'Pay-as-you-go': 'usage_stats.credentials_quota_label_pay_as_you_go',
++  'Code Assist Credit': 'usage_stats.credentials_quota_label_code_assist_credit',
++};
++
++const QUOTA_LABEL_SUFFIX_KEYS: ReadonlyArray<[string, string]> = [
++  [' 5h', 'usage_stats.credentials_quota_label_5h'],
++  [' Weekly', 'usage_stats.credentials_quota_label_weekly'],
++  [' Monthly', 'usage_stats.credentials_quota_label_monthly'],
++  [' Primary', 'usage_stats.credentials_quota_label_primary'],
++  [' Secondary', 'usage_stats.credentials_quota_label_secondary'],
++  [' Usage', 'usage_stats.credentials_quota_label_usage'],
++];
++
++export function formatQuotaLabel(t: Translate, rawLabel: string): string {
++  const label = rawLabel.trim();
++  const exactKey = QUOTA_LABEL_EXACT_KEYS[label];
++  if (exactKey) {
++    return t(exactKey);
++  }
++
++  for (const [suffix, periodKey] of QUOTA_LABEL_SUFFIX_KEYS) {
++    if (!label.endsWith(suffix)) continue;
++    const rawPrefix = label.slice(0, -suffix.length).trim();
++    if (!rawPrefix) return t(periodKey);
++    const prefix = rawPrefix === 'Code Review'
++      ? t('usage_stats.credentials_quota_label_code_review')
++      : rawPrefix;
++    return t('usage_stats.credentials_quota_label_prefixed', {
++      prefix,
++      period: t(periodKey),
++    });
++  }
++
++  return label;
++}
++
++export function formatQuotaResetDuration(resetAt: string, t: Translate): string {
+   const resetMs = new Date(resetAt).getTime()
+   if (!Number.isFinite(resetMs)) {
+     return ''
+@@ -1712,7 +1756,16 @@ export function formatQuotaResetDuration(resetAt: string): string {
+   const days = Math.floor(remainingMinutes / 1_440)
+   const hours = Math.floor((remainingMinutes % 1_440) / 60)
+   const minutes = remainingMinutes % 60
+-  return days > 0 ? `${days}d${hours}h${minutes}m` : `${hours}h${minutes}m`
++  return days > 0
++    ? t('usage_stats.credentials_quota_reset_duration_days', {
++        days: String(days),
++        hours: String(hours),
++        minutes: String(minutes),
++      })
++    : t('usage_stats.credentials_quota_reset_duration_hours', {
++        hours: String(hours),
++        minutes: String(minutes),
++      })
+ }
+
+ export function formatQuotaWindowUsageAriaLabel(t: Translate, windowUsage: NonNullable<DisplayQuota['windowUsage']>): string {
+@@ -1738,7 +1791,8 @@ function QuotaBar({ quota, quotaUsageMode }: { quota: DisplayQuota; quotaUsageMo
+   const width = `${Math.max(0, Math.min(100, percent))}%`
+   const percentLabel = quota.barPercent === null ? '' : `${Math.round(quota.barPercent)}%`
+   const resetLabel = quota.resetText ? formatQuotaResetLabel(quota.resetText) : ''
+-  const resetDuration = quota.resetText ? formatQuotaResetDuration(quota.resetText) : ''
++  const resetDuration = quota.resetText ? formatQuotaResetDuration(quota.resetText, t) : ''
++  const quotaLabel = formatQuotaLabel(t, quota.label)
+   const billingUsage = quota.billingUsage
+   const windowUsage = billingUsage ? undefined : quotaWindowUsageForMode(quota, quotaUsageMode)
+   const hasGroupDescription = Boolean(quota.groupDescription?.trim())
+@@ -1747,7 +1801,7 @@ function QuotaBar({ quota, quotaUsageMode }: { quota: DisplayQuota; quotaUsageMo
+     <div className={styles.credentialQuotaBarBlock}>
+       <div className={styles.credentialQuotaBarHeader}>
+         <span className={styles.credentialQuotaLabelGroup}>
+-          <span>{quota.label}</span>
++          <span>{quotaLabel}</span>
+         </span>
+         {(resetDuration || percentLabel) && (
+           <span className={styles.credentialQuotaValueGroup}>
+diff --git a/web/src/components/usage/credentials/test/AuthFileCredentialsSection.test.ts b/web/src/components/usage/credentials/test/AuthFileCredentialsSection.test.ts
+index 7c3863ed4b47e6cff9ec3361dccedae432d8424b..d21c1b40868f7a680e60d5055df64be223015818 100644
+--- a/web/src/components/usage/credentials/test/AuthFileCredentialsSection.test.ts
++++ b/web/src/components/usage/credentials/test/AuthFileCredentialsSection.test.ts
+@@ -1,7 +1,7 @@
+ import { createElement } from 'react'
+ import { renderToStaticMarkup } from 'react-dom/server'
+ import { describe, expect, it, vi } from 'vitest'
+-import { AuthFileCredentialsSection, AuthFileQuotaPanel, INSPECTION_RESULT_PAGE_SIZE_OPTIONS, QuotaAutoRefreshSettingsModal, QuotaInspectionModal, buildInspectionResultsPage, buildInvalidInspectionAccountFileNames, buildQuotaAutoRefreshSettings, formatInspectionCompletedAt, formatInspectionProgressPercent, formatQuotaErrorDisplay, formatQuotaResetDuration, formatQuotaResetLabel, formatQuotaWindowUsageAriaLabel, inspectionIndicatorTone, invertInvalidInspectionAccountFileNames, isAutoRefreshSettingsControlDisabled, isAutoRefreshSettingsSaveDisabled, isInspectionStartDisabled, isQuotaInspectionCloseDisabled, isSelectableInspectionStatusFilter, nextInspectionResultStatusFilter, persistAuthFileDisplayMode, readStoredAuthFileDisplayMode, resolveQuotaAutoRefreshSettingsLoadFailure, selectAllInvalidInspectionAccountFileNames } from '../AuthFileCredentialsSection'
++import { AuthFileCredentialsSection, AuthFileQuotaPanel, INSPECTION_RESULT_PAGE_SIZE_OPTIONS, QuotaAutoRefreshSettingsModal, QuotaInspectionModal, buildInspectionResultsPage, buildInvalidInspectionAccountFileNames, buildQuotaAutoRefreshSettings, formatInspectionCompletedAt, formatInspectionProgressPercent, formatQuotaErrorDisplay, formatQuotaLabel, formatQuotaResetDuration, formatQuotaResetLabel, formatQuotaWindowUsageAriaLabel, inspectionIndicatorTone, invertInvalidInspectionAccountFileNames, isAutoRefreshSettingsControlDisabled, isAutoRefreshSettingsSaveDisabled, isInspectionStartDisabled, isQuotaInspectionCloseDisabled, isSelectableInspectionStatusFilter, nextInspectionResultStatusFilter, persistAuthFileDisplayMode, readStoredAuthFileDisplayMode, resolveQuotaAutoRefreshSettingsLoadFailure, selectAllInvalidInspectionAccountFileNames } from '../AuthFileCredentialsSection'
+ import type { AuthFileCredentialRow, DisplayQuota } from '../credentialViewModels'
+ import type { UsageQuotaInspectionResult, UsageQuotaInspectionResultStatus } from '@/lib/types'
+
+@@ -36,10 +36,51 @@ const createAuthFileSectionProps = (overrides: Partial<Parameters<typeof AuthFil
+ vi.mock('react-i18next', () => ({
+   initReactI18next: { type: '3rdParty', init: () => undefined },
+   useTranslation: () => ({
+-    t: (key: string, params?: Record<string, string>) => `${key}:${params?.tokens ?? ''}:${params?.cost ?? ''}`,
++    t: (key: string, params?: Record<string, string>) => {
++      const labels: Record<string, string> = {
++        'usage_stats.credentials_quota_label_5h': '5-hour quota',
++        'usage_stats.credentials_quota_label_weekly': 'Weekly quota',
++        'usage_stats.credentials_quota_label_monthly': 'Monthly quota',
++        'usage_stats.credentials_quota_label_primary': 'Primary quota',
++        'usage_stats.credentials_quota_label_secondary': 'Secondary quota',
++        'usage_stats.credentials_quota_label_code_review': 'Code review',
++        'usage_stats.credentials_quota_label_monthly_spend': 'Monthly spending limit',
++        'usage_stats.credentials_quota_label_pay_as_you_go': 'Pay-as-you-go limit',
++        'usage_stats.credentials_quota_label_code_assist_credit': 'Code Assist credit',
++        'usage_stats.credentials_quota_label_usage': 'usage',
++      }
++      if (labels[key]) return labels[key]
++      if (key === 'usage_stats.credentials_quota_label_prefixed') return `${params?.prefix} · ${params?.period}`
++      if (key === 'usage_stats.credentials_quota_reset_duration_days') return `${params?.days}d ${params?.hours}h ${params?.minutes}m`
++      if (key === 'usage_stats.credentials_quota_reset_duration_hours') return `${params?.hours}h ${params?.minutes}m`
++      return `${key}:${params?.tokens ?? ''}:${params?.cost ?? ''}`
++    },
+   }),
+ }))
+
++const englishQuotaTranslate = (key: string, params?: Record<string, string>) => {
++  if (key === 'usage_stats.credentials_quota_reset_duration_days') return `${params?.days}d ${params?.hours}h ${params?.minutes}m`
++  if (key === 'usage_stats.credentials_quota_reset_duration_hours') return `${params?.hours}h ${params?.minutes}m`
++  return key
++}
++
++const chineseQuotaTranslate = (key: string, params?: Record<string, string>) => {
++  const labels: Record<string, string> = {
++    'usage_stats.credentials_quota_label_5h': '5 小时额度',
++    'usage_stats.credentials_quota_label_weekly': '每周额度',
++    'usage_stats.credentials_quota_label_monthly': '每月额度',
++    'usage_stats.credentials_quota_label_primary': '主要额度',
++    'usage_stats.credentials_quota_label_secondary': '次要额度',
++    'usage_stats.credentials_quota_label_code_review': '代码审查',
++    'usage_stats.credentials_quota_label_usage': '用量',
++  }
++  if (labels[key]) return labels[key]
++  if (key === 'usage_stats.credentials_quota_label_prefixed') return `${params?.prefix} · ${params?.period}`
++  if (key === 'usage_stats.credentials_quota_reset_duration_days') return `${params?.days}天 ${params?.hours}小时 ${params?.minutes}分钟`
++  if (key === 'usage_stats.credentials_quota_reset_duration_hours') return `${params?.hours}小时 ${params?.minutes}分钟`
++  return key
++}
++
+ const formatLocalResetTime = (resetAt: string) => {
+   const resetTime = new Date(resetAt)
+   const month = String(resetTime.getMonth() + 1).padStart(2, '0')
+@@ -55,7 +96,8 @@ describe('AuthFileCredentialsSection quota reset formatting', () => {
+     try {
+       const resetAt = '2026-05-12T10:15:00Z'
+       expect(formatQuotaResetLabel(resetAt)).toBe(formatLocalResetTime(resetAt))
+-      expect(formatQuotaResetDuration(resetAt)).toBe('2d0h15m')
++      expect(formatQuotaResetDuration(resetAt, englishQuotaTranslate)).toBe('2d 0h 15m')
++      expect(formatQuotaResetDuration(resetAt, chineseQuotaTranslate)).toBe('2天 0小时 15分钟')
+     } finally {
+       vi.useRealTimers()
+     }
+@@ -66,11 +108,19 @@ describe('AuthFileCredentialsSection quota reset formatting', () => {
+     try {
+       const resetAt = '2026-05-10T14:15:00Z'
+       expect(formatQuotaResetLabel(resetAt)).toBe(formatLocalResetTime(resetAt))
+-      expect(formatQuotaResetDuration(resetAt)).toBe('4h15m')
++      expect(formatQuotaResetDuration(resetAt, englishQuotaTranslate)).toBe('4h 15m')
++      expect(formatQuotaResetDuration(resetAt, chineseQuotaTranslate)).toBe('4小时 15分钟')
+     } finally {
+       vi.useRealTimers()
+     }
+   })
++
++  it('translates known quota periods while preserving model names', () => {
++    expect(formatQuotaLabel(chineseQuotaTranslate, '5h')).toBe('5 小时额度')
++    expect(formatQuotaLabel(chineseQuotaTranslate, 'Weekly')).toBe('每周额度')
++    expect(formatQuotaLabel(chineseQuotaTranslate, 'GPT-5.3-Codex-Spark 5h')).toBe('GPT-5.3-Codex-Spark · 5 小时额度')
++    expect(formatQuotaLabel(chineseQuotaTranslate, 'Code Review Monthly')).toBe('代码审查 · 每月额度')
++  })
+ })
+
+ describe('AuthFileCredentialsSection title', () => {
+@@ -325,7 +375,7 @@ describe('AuthFileCredentialsSection quota usage mode rendering', () => {
+
+     const html = renderToStaticMarkup(createElement(AuthFileQuotaPanel, { row: groupedRow, quotaUsageMode: 'current' }))
+
+-    expect(html).toContain('>5h<')
++    expect(html).toContain('>5-hour quota<')
+     expect(html).toContain('credentialQuotaGroupLabel')
+     expect(html).toContain('Gemini Models')
+     expect(html).toContain('credentialQuotaGroupTooltipTarget')
+@@ -368,7 +418,7 @@ describe('AuthFileCredentialsSection quota usage mode rendering', () => {
+
+     const html = renderToStaticMarkup(createElement(AuthFileQuotaPanel, { row: billingRow, quotaUsageMode: 'current' }))
+
+-    expect(html).toContain('Monthly Spend')
++    expect(html).toContain('Monthly spending limit')
+     expect(html).toContain('$1.67')
+     expect(html).toContain('$200.00')
+     expect(html.match(/<img/g)).toHaveLength(1)
+@@ -389,9 +439,9 @@ describe('AuthFileCredentialsSection quota usage mode rendering', () => {
+
+     const html = renderToStaticMarkup(createElement(AuthFileQuotaPanel, { row: xaiRow, quotaUsageMode: 'current' }))
+
+-    expect(html.indexOf('Weekly')).toBeLessThan(html.indexOf('Monthly Spend'))
+-    expect(html.indexOf('Monthly Spend')).toBeLessThan(html.indexOf('Pay-as-you-go'))
+-    expect(html.indexOf('Pay-as-you-go')).toBeLessThan(html.indexOf('Grok 4 Usage'))
++    expect(html.indexOf('Weekly quota')).toBeLessThan(html.indexOf('Monthly spending limit'))
++    expect(html.indexOf('Monthly spending limit')).toBeLessThan(html.indexOf('Pay-as-you-go limit'))
++    expect(html.indexOf('Pay-as-you-go limit')).toBeLessThan(html.indexOf('Grok 4 · usage'))
+   })
+ })
+
+diff --git a/web/src/components/usage/test/PriceSettingsCard.test.tsx b/web/src/components/usage/test/PriceSettingsCard.test.tsx
+index 0a8882ddc6de0e7df2fd75e7adf4c7cbd6955703..8d9be9c7564282329dcf770fa2cdb112d68588bb 100644
+--- a/web/src/components/usage/test/PriceSettingsCard.test.tsx
++++ b/web/src/components/usage/test/PriceSettingsCard.test.tsx
+@@ -1,11 +1,12 @@
+ import { readFileSync } from 'node:fs';
+ import React from 'react';
+-import '@/i18n';
++import i18n from '@/i18n';
+ import { describe, expect, it } from 'vitest';
+ import { renderToStaticMarkup } from 'react-dom/server';
+ import {
+   buildPricingModelOptions,
+   buildSelectedSyncPrices,
++  formatPricingMatchType,
+   markPricingSyncFailures,
+   notifyPricingSyncUnexpectedError,
+   PriceSettingsCard,
+@@ -73,39 +74,71 @@ describe('PriceSettingsCard', () => {
+
+     expect(html).toContain('Claude');
+     expect(html).toContain('Cache Read');
+-    expect(html).toContain('$0.3000/1M');
++    expect(html).toContain('$0.3000 per 1M tokens');
+     expect(html).toContain('Cache Write');
+-    expect(html).toContain('$3.7500/1M');
++    expect(html).toContain('$3.7500 per 1M tokens');
+     expect(html).toContain('Multiplier');
+     expect(html).toContain('1');
+   });
+
+   it('renders OpenAI pricing style with cache read and write prices', () => {
+-		const html = renderToStaticMarkup(
+-			<PriceSettingsCard
+-				modelNames={['gpt-5.6-terra']}
+-				modelPrices={{
+-					'gpt-5.6-terra': {
+-						style: 'openai',
+-						prompt: 2.5,
+-						completion: 15,
+-						cacheRead: 0.25,
+-						cacheWrite: 3.125,
+-						multiplier: 1,
+-					},
+-				}}
+-				onPriceSave={() => undefined}
+-				onPriceDelete={() => undefined}
+-				loading={false}
+-			/>,
+-		);
++    const html = renderToStaticMarkup(
++      <PriceSettingsCard
++        modelNames={['gpt-5.6-terra']}
++        modelPrices={{
++          'gpt-5.6-terra': {
++            style: 'openai',
++            prompt: 2.5,
++            completion: 15,
++            cacheRead: 0.25,
++            cacheWrite: 3.125,
++            multiplier: 1,
++          },
++        }}
++        onPriceSave={() => undefined}
++        onPriceDelete={() => undefined}
++        loading={false}
++      />,
++    );
+
+-		expect(html).toContain('OpenAI');
+-		expect(html).toContain('Cache Read');
+-		expect(html).toContain('$0.2500/1M');
+-		expect(html).toContain('Cache Write');
+-		expect(html).toContain('$3.1250/1M');
+-	});
++    expect(html).toContain('OpenAI');
++    expect(html).toContain('Cache Read');
++    expect(html).toContain('$0.2500 per 1M tokens');
++    expect(html).toContain('Cache Write');
++    expect(html).toContain('$3.1250 per 1M tokens');
++  });
++
++  it('uses plain Chinese price units and match descriptions', async () => {
++    await i18n.changeLanguage('zh');
++    try {
++      const html = renderToStaticMarkup(
++        <PriceSettingsCard
++          modelNames={['gpt-5.6-terra']}
++          modelPrices={{
++            'gpt-5.6-terra': {
++              style: 'openai',
++              prompt: 2.5,
++              completion: 15,
++              cacheRead: 0.25,
++              cacheWrite: 3.125,
++              multiplier: 1,
++            },
++          }}
++          onPriceSave={() => undefined}
++          onPriceDelete={() => undefined}
++          loading={false}
++        />,
++      );
++
++      expect(html).toContain('发送内容（Token）（美元 / 每 100 万 Token）');
++      expect(html).toContain('每 100 万 Token $0.2500');
++      expect(formatPricingMatchType(i18n.t, 'index_exact')).toBe('名称完全匹配');
++      expect(formatPricingMatchType(i18n.t, 'index_normalized_suffix')).toBe('去掉前缀后写法相同');
++      expect(formatPricingMatchType(i18n.t, 'future_match')).toBe('其他匹配（future_match）');
++    } finally {
++      await i18n.changeLanguage('en');
++    }
++  });
+
+   it('renders saved model prices in natural descending model-name order', () => {
+     const prices = Object.fromEntries([
+diff --git a/web/src/components/usage/test/RequestEventsDetailsCardRequestLog.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCardRequestLog.test.tsx
+index e0654c9f021645b50fce68ebbde325ebd82f8b44..7c8d7458d813854c49207ef788339a7e44c0672e 100644
+--- a/web/src/components/usage/test/RequestEventsDetailsCardRequestLog.test.tsx
++++ b/web/src/components/usage/test/RequestEventsDetailsCardRequestLog.test.tsx
+@@ -114,6 +114,8 @@ describe('RequestEventsDetailsCard request log virtualization', () => {
+
+   afterEach(async () => {
+     await act(async () => root.unmount());
++    // TanStack Virtual debounces its final scroll notification by 150 ms.
++    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 200)));
+     container.remove();
+     document.body.innerHTML = '';
+     vi.unstubAllGlobals();
+diff --git a/web/src/i18n/index.test.ts b/web/src/i18n/index.test.ts
+index a95089e30c21f4e4a54635357f844b5adf72a6d0..5cd1674d2fc6a6239d4f6ce2b3e73e02ae112f87 100644
+--- a/web/src/i18n/index.test.ts
++++ b/web/src/i18n/index.test.ts
+@@ -20,12 +20,12 @@ describe('i18n resources', () => {
+
+   it('keeps Auth Files display mode labels available in every language', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_auth_files_display_mode_aria')).toBe('Auth file display mode');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_auth_files_display_mode_aria')).toBe('认证文件显示模式');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_auth_files_display_mode_aria')).toBe('选择查看剩余额度或账号状态');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_auth_files_display_mode_aria')).toBe('認證檔案顯示模式');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_auth_files_display_mode_quota')).toBe('Quota');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_auth_files_display_mode_health')).toBe('Health');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_auth_files_display_mode_quota')).toBe('限额');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_auth_files_display_mode_health')).toBe('健康');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_auth_files_display_mode_quota')).toBe('剩余额度');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_auth_files_display_mode_health')).toBe('是否可用');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_auth_files_display_mode_quota')).toBe('限額');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_auth_files_display_mode_health')).toBe('健康');
+   });
+@@ -36,9 +36,9 @@ describe('i18n resources', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_column_health')).toBe('Health');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_column_activity')).toBe('Activity');
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_column_name')).toBe('名称');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_column_quota')).toBe('限额');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_column_health')).toBe('健康');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_column_activity')).toBe('活动');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_column_quota')).toBe('剩余额度');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_column_health')).toBe('是否可用');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_column_activity')).toBe('最近使用');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_column_name')).toBe('名稱');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_column_quota')).toBe('限額');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_column_health')).toBe('健康');
+@@ -48,8 +48,8 @@ describe('i18n resources', () => {
+   it('keeps session source labels available in every language', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.session_settings_source_standard')).toBe('Standalone');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.session_settings_source_embed')).toBe('CPAMC Embed');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.session_settings_source_standard')).toBe('独立访问');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.session_settings_source_embed')).toBe('CPAMC 嵌入');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.session_settings_source_standard')).toBe('直接打开网页');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.session_settings_source_embed')).toBe('从 CPAMC 打开');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.session_settings_source_standard')).toBe('獨立訪問');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.session_settings_source_embed')).toBe('CPAMC 嵌入');
+   });
+@@ -72,10 +72,10 @@ describe('i18n resources', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_health_grid_aria')).toBe('{{name}} request health over the last 5 hours');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_health_bucket_aria')).toBe('{{timeRange}}: {{status}}, {{successCount}} successful, {{failureCount}} failed, {{rate}}');
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_last_5h')).toBe('最近 5 小时');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_status_warning')).toBe('部分失败');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_summary_healthy')).toBe('健康');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_summary_degraded')).toBe('异常');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_summary_quiet')).toBe('安静');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_status_warning')).toBe('有部分请求失败');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_summary_healthy')).toBe('可用');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_summary_degraded')).toBe('有失败');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_summary_quiet')).toBe('暂无请求');
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_no_failures_5h')).toBe('5 小时内无失败');
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_last_failure')).toBe('最近失败 {{timeRange}}');
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_health_bucket_aria')).toBe('{{timeRange}}：{{status}}，成功 {{successCount}}，失败 {{failureCount}}，{{rate}}');
+@@ -90,12 +90,12 @@ describe('i18n resources', () => {
+   });
+
+   it('localizes Analysis tab and composition controls in Chinese', () => {
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.tab_analysis')).toBe('分析');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.tab_analysis')).toBe('详细分析');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_composition_title')).toBe('Usage Distribution');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_title')).toBe('用量分布');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_auth_files_tab')).toBe('认证文件');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_ai_provider_tab')).toBe('AI 供应商');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_token_percent')).toBe('Token %');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_title')).toBe('用量来自哪里');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_auth_files_tab')).toBe('登录账号');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_ai_provider_tab')).toBe('服务商账号');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_token_percent')).toBe('用量占比（Token）');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.tab_analysis')).toBe('分析');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_composition_title')).toBe('用量分布');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_composition_auth_files_tab')).toBe('認證檔案');
+@@ -110,15 +110,15 @@ describe('i18n resources', () => {
+   });
+
+   it('uses explicit Chinese labels for request event latency columns', () => {
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.ttft')).toBe('首字延迟');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.latency')).toBe('总延迟');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.ttft')).toBe('开始回复');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.latency')).toBe('整次耗时');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.ttft')).toBe('首字延遲');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.latency')).toBe('總延遲');
+   });
+
+   it('uses compact Chinese labels for request event type column', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.request_type')).toBe('Type');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.request_type')).toBe('类型');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.request_type')).toBe('请求方式');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.request_type')).toBe('類型');
+   });
+
+@@ -127,7 +127,7 @@ describe('i18n resources', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.speed_mode_standard')).toBe('Standard');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.speed_mode_fast')).toBe('Fast');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.speed_mode_flex')).toBe('Flex');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.speed_mode')).toBe('速度模式');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.speed_mode')).toBe('处理速度');
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.speed_mode_standard')).toBe('标准');
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.speed_mode_fast')).toBe('快速');
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.speed_mode_flex')).toBe('弹性');
+@@ -139,7 +139,7 @@ describe('i18n resources', () => {
+
+   it('keeps Analysis heatmap copy focused on hover details', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_heatmap_subtitle')).toBe('Token distribution across API keys and models with hover details.');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_heatmap_subtitle')).toBe('展示 API Key 与模型组合下的 Token 分布，悬浮查看明细。');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_heatmap_subtitle')).toBe('查看每个 API Key 分别用了哪些模型以及用了多少 Token，鼠标移上去可看明细。');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_heatmap_subtitle')).toBe('顯示 API Key 與模型組合下的 Token 分布，懸浮查看明細。');
+   });
+
+@@ -147,8 +147,8 @@ describe('i18n resources', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_cost_per_million_tokens')).toBe('Cost / 1M Tokens');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_blended_rate')).toBe('Blended Rate');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_cost_share')).toBe('Cost Share');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_blended_rate')).toBe('混合费率');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_cost_share')).toBe('成本占比');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_blended_rate')).toBe('平均单价');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_cost_share')).toBe('费用占比');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_blended_rate')).toBe('混合費率');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_cost_share')).toBe('成本占比');
+   });
+@@ -169,13 +169,13 @@ describe('i18n resources', () => {
+
+   it('localizes realtime overview fallback errors', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.overview_realtime_load_failed')).toBe('Failed to load realtime overview');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_load_failed')).toBe('实时概览加载失败');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_load_failed')).toBe('最近使用情况加载失败');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.overview_realtime_load_failed')).toBe('即時概覽載入失敗');
+   });
+
+   it('labels the realtime overview section as metrics', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.overview_realtime_section_title')).toBe('Realtime Metrics');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_section_title')).toBe('实时指标');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_section_title')).toBe('最近使用情况');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.overview_realtime_section_title')).toBe('即時指標');
+   });
+
+@@ -184,20 +184,20 @@ describe('i18n resources', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.overview_realtime_latency_empty')).toBe('No latency samples');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.overview_realtime_cache_empty')).toBe('No calculable cache rate');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.overview_realtime_rolling_metric_hint')).toBe('Latest, average and trend use rolling aggregation for the selected window.');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_ttft_empty')).toBe('暂无 TTFT 样本');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_cache_empty')).toBe('暂无可计算的缓存率');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_ttft_empty')).toBe('没有开始回复时间数据');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_cache_empty')).toBe('没有可计算的复用数据');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.overview_realtime_latency_empty')).toBe('暫無 Latency 樣本');
+   });
+
+   it('uses a token share label for the realtime current-usage card', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.overview_realtime_current_usage')).toBe('Token Share');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_current_usage')).toBe('Token 占比');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_current_usage')).toBe('用量由谁产生（Token）');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.overview_realtime_current_usage')).toBe('Token 占比');
+   });
+
+   it('labels realtime window deltas as trend instead of period-over-period change', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.overview_realtime_trend')).toBe('Trend');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_trend')).toBe('趋势');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_trend')).toBe('前后变化');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.overview_realtime_trend')).toBe('趨勢');
+   });
+
+@@ -214,7 +214,7 @@ describe('i18n resources', () => {
+     const zh = i18n.getResourceBundle('zh', 'translation');
+     const zhTW = i18n.getResourceBundle('zh-TW', 'translation');
+
+-    expect(zh.usage_stats.tab_analysis).toBe('分析');
++    expect(zh.usage_stats.tab_analysis).toBe('详细分析');
+     expect(zhTW.usage_stats.tab_analysis).toBe('分析');
+     expect(JSON.stringify(zh)).not.toMatch(/该 key|当前 key|完整 key|打开 Key 概览|API-Key|凭证的只读|当前凭证/);
+     expect(JSON.stringify(zhTW)).not.toMatch(/該 key|目前 key|完整 key|開啟 Key 總覽|API-Key|金鑰的唯讀|目前金鑰/);
+@@ -250,7 +250,7 @@ describe('i18n resources', () => {
+
+   it('labels reached-limit Auth Files inspection results in every language', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_inspection_limit_reached')).toBe('Limit reached');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_inspection_limit_reached')).toBe('达到限额');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_inspection_limit_reached')).toBe('额度已用完');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_inspection_limit_reached')).toBe('達到限額');
+   });
+
+@@ -264,14 +264,14 @@ describe('i18n resources', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_quota_reset_message_prompt')).toBe('Consume 1 credit to reset now?')
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_quota_reset_confirm')).toBe('Reset')
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_quota_reset_failed')).toBe('Quota reset failed. Please try again later.')
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_title')).toBe('重置 Codex 限额')
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_button')).toBe('重置限额，可用 {{count}} 次')
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_title')).toBe('恢复 Codex 额度')
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_button')).toBe('恢复额度，可用 {{count}} 次')
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_tooltip_suffix')).toBe('次重置机会')
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_message')).toBe('当前有 {{count}} 次可用重置次数。是否消耗 1 次立即重置？')
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_message')).toBe('现在可以恢复 {{count}} 次额度。是否使用 1 次机会立即恢复？')
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_message_suffix')).toBe('次可用重置次数。')
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_message_prompt')).toBe('是否消耗 1 次立即重置？')
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_confirm')).toBe('确认重置')
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_failed')).toBe('重置限额失败，请稍后重试。')
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_message_prompt')).toBe('是否使用 1 次机会立即恢复？')
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_confirm')).toBe('确认恢复')
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_failed')).toBe('恢复额度失败，请稍后重试。')
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_title')).toBe('重置 Codex 限額')
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_button')).toBe('重置限額，可用 {{count}} 次')
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_tooltip_suffix')).toBe('次重置機會')
+@@ -284,7 +284,7 @@ describe('i18n resources', () => {
+
+   it('keeps the login product title aligned across languages', () => {
+     expect(i18n.getResourceBundle('en', 'translation').auth.login_title).toBe('CPA Usage Statistics Dashboard');
+-    expect(i18n.getResourceBundle('zh', 'translation').auth.login_title).toBe('CPA 用量统计\n仪表盘');
++    expect(i18n.getResourceBundle('zh', 'translation').auth.login_title).toBe('中转使用情况');
+     expect(i18n.getResourceBundle('zh-TW', 'translation').auth.login_title).toBe('CPA 用量統計\n儀表板');
+   });
+ });
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9acbfe0f9df 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -2,7 +2,7 @@ import i18n from 'i18next';
+ import { initReactI18next } from 'react-i18next';
+
+ const LANGUAGE_STORAGE_KEY = 'cpa-usage-keeper-language';
+-const DEFAULT_LANGUAGE = 'en';
++export const DEFAULT_LANGUAGE = 'en';
+ export const SUPPORTED_LANGUAGES = ['en', 'zh', 'zh-TW'] as const;
+
+ export type SupportedLanguage = (typeof SUPPORTED_LANGUAGES)[number];
+@@ -145,6 +145,10 @@ const resources = {
+         overview_realtime_cache_empty: 'No calculable cache rate',
+         overview_realtime_usage_empty: 'No token share data',
+         overview_realtime_rolling_metric_hint: 'Latest, average and trend use rolling aggregation for the selected window.',
++        overview_realtime_window_15m: '15m',
++        overview_realtime_window_30m: '30m',
++        overview_realtime_window_60m: '60m',
++        overview_realtime_per_minute_value: '{{value}}/min',
+         overview_realtime_tokens_label: 'Tokens',
+         overview_realtime_requests_label: 'Requests',
+         overview_realtime_cost_label: 'Cost',
+@@ -169,11 +173,16 @@ const resources = {
+         ttft_hint: 'Time to First Token',
+         speed: 'Speed',
+         speed_hint: 'Average visible output tokens per second after TTFT',
++        speed_value: '{{value}} tokens/s',
+         speed_mode: 'Speed Mode',
+         speed_mode_standard: 'Standard',
+         speed_mode_fast: 'Fast',
+         speed_mode_flex: 'Flex',
++        speed_mode_batch: 'Batch processing',
++        speed_mode_unknown: 'Other ({{value}})',
+         request_type: 'Type',
++        request_type_sse: 'Streaming response (SSE)',
++        request_type_ws: 'Realtime connection (WS)',
+         request_endpoint: 'Endpoint',
+         cache_rate: 'Cache Rate',
+         cache_read_tokens: 'Cache Read',
+@@ -181,6 +190,13 @@ const resources = {
+         reasoning_tokens: 'Reasoning',
+         reasoning_effort: 'Effort',
+         reasoning_effort_hint: 'Reasoning Effort',
++        reasoning_effort_none: 'None',
++        reasoning_effort_minimal: 'Minimal',
++        reasoning_effort_low: 'Low',
++        reasoning_effort_medium: 'Medium',
++        reasoning_effort_high: 'High',
++        reasoning_effort_xhigh: 'Extra high',
++        reasoning_effort_unknown: 'Other ({{value}})',
+         rpm: 'RPM',
+         tpm: 'TPM',
+         rpm_30m: 'RPM (30m)',
+@@ -389,6 +405,19 @@ const resources = {
+         credentials_quota_usage_mode_aria: 'Quota usage display mode',
+         credentials_quota_usage_mode_current: 'Current',
+         credentials_quota_usage_mode_estimated: 'Estimated',
++        credentials_quota_label_5h: '5-hour quota',
++        credentials_quota_label_weekly: 'Weekly quota',
++        credentials_quota_label_monthly: 'Monthly quota',
++        credentials_quota_label_primary: 'Primary quota',
++        credentials_quota_label_secondary: 'Secondary quota',
++        credentials_quota_label_code_review: 'Code review',
++        credentials_quota_label_monthly_spend: 'Monthly spending limit',
++        credentials_quota_label_pay_as_you_go: 'Pay-as-you-go limit',
++        credentials_quota_label_code_assist_credit: 'Code Assist credit',
++        credentials_quota_label_usage: 'usage',
++        credentials_quota_label_prefixed: '{{prefix}} · {{period}}',
++        credentials_quota_reset_duration_days: '{{days}}d {{hours}}h {{minutes}}m',
++        credentials_quota_reset_duration_hours: '{{hours}}h {{minutes}}m',
+         credentials_last_used: 'Last used',
+         credentials_stats_updated: 'Stats updated',
+         credentials_health_last_5h: 'Last 5h',
+@@ -475,6 +504,9 @@ const resources = {
+         model_price_cache_read: 'Cache Read',
+         model_price_cache_write: 'Cache Write',
+         model_price_multiplier: 'Multiplier',
++        model_price_field_with_unit: '{{label}} ({{unit}})',
++        model_price_unit_per_million: 'USD per 1M tokens',
++        model_price_value_per_million: '{{value}} per 1M tokens',
+         saved_prices: 'Saved Prices',
+         model_price_empty: 'No saved prices',
+         model_price_save_success: 'Model price saved.',
+@@ -493,6 +525,11 @@ const resources = {
+         model_price_sync_unmatched: 'Unmatched',
+         model_price_sync_matched_model: 'Matched: {{model}}',
+         model_price_sync_provider: 'Provider: {{provider}} ({{id}})',
++        model_price_match_exact: 'Exact name match',
++        model_price_match_suffix: 'Exact match after removing prefix',
++        model_price_match_normalized: 'Equivalent name match',
++        model_price_match_normalized_suffix: 'Equivalent match after removing prefix',
++        model_price_match_other: 'Other match ({{value}})',
+         model_price_sync_existing: 'Current',
+         model_price_sync_toggle: 'Select {{model}}',
+         model_price_sync_select_all: 'Select all',
+@@ -576,27 +613,27 @@ const resources = {
+         no_requests: '暂无请求'
+       },
+       auth: {
+-        login_title: 'CPA 用量统计\n仪表盘',
+-        login_subtitle: '持续保存 CPA 请求记录，聚合用量分析，并在受保护的控制台中查看请求健康、模型活动与 API 统计。',
+-        console_kicker: '访问控制',
+-        console_title: '选择访问方式',
+-        console_hint: '管理员可进入完整控制台；API Key 查看者只能查看该 API Key 对应的只读概览。',
+-        capabilities_label: '用量控制台能力',
+-        capability_persistence: 'CPA 用量记录持久保存',
+-        capability_analytics: '按时间范围聚合分析',
+-        capability_health: '请求健康与稳定性信号',
+-        capability_models: '模型、Token 与 API 统计',
++        login_title: '中转使用情况',
++        login_subtitle: '查看每次请求用了多少、是否成功、花了多久，以及各个模型和 API 的使用情况。',
++        console_kicker: '登录',
++        console_title: '选择登录方式',
++        console_hint: '管理员可以查看全部数据；使用 API Key 登录时，只能查看这个 Key 自己的数据。',
++        capabilities_label: '这里可以查看',
++        capability_persistence: '长期保存请求记录',
++        capability_analytics: '按时间查看使用量',
++        capability_health: '查看请求是否正常',
++        capability_models: '查看模型、Token 和 API 使用量',
+         login_method: '登录方式',
+-        admin_tab: '管理员密码',
+-        api_key_tab: 'API Key 查看',
++        admin_tab: '管理员登录',
++        api_key_tab: '用 API Key 查看',
+         password_label: '管理员密码',
+         password_placeholder: '请输入管理员密码',
+-        password_hint: '使用已配置的控制台密码进入完整管理界面。',
++        password_hint: '输入服务器设置的后台密码，可以查看全部数据。',
+         api_key_label: 'CPA API Key',
+         api_key_placeholder: '粘贴你的 CPA API Key',
+-        api_key_hint: 'API Key 访问只会打开对应 API Key 的只读用量概览。',
+-        login_submit: '进入管理控制台',
+-        api_key_login_submit: '打开 API Key 概览',
++        api_key_hint: '只能查看这个 API Key 自己的使用数据，不能修改设置。',
++        login_submit: '进入后台',
++        api_key_login_submit: '查看这个 API Key',
+         invalid_password: '密码错误',
+         invalid_api_key: 'API Key 错误',
+         login_rate_limited: '尝试次数过多，请稍后再试。',
+@@ -605,9 +642,9 @@ const resources = {
+         session_expired: '登录状态已失效，请重新登录。'
+       },
+       key_overview: {
+-        eyebrow: 'API Key 概览',
+-        title: 'API Key 用量概览',
+-        subtitle: '只读查看当前 API Key 的 CPA 用量分析，包括请求量、Token 构成、成本趋势与稳定性时间线。',
++        eyebrow: '只读查看',
++        title: '这个 API Key 的使用情况',
++        subtitle: '查看请求次数、Token 使用量、费用变化和请求是否正常。',
+         tabs_aria_label: 'API Key 概览分区',
+         identity_unknown: '当前 API Key',
+         logout: '退出登录',
+@@ -615,7 +652,7 @@ const resources = {
+         rate_limited: '概览刷新过于频繁，请稍候再试。'
+       },
+       usage_stats: {
+-        title: '用量',
++        title: '使用情况',
+         refresh: '刷新',
+         sync_now: '立即同步',
+         check_updates: '检查更新',
+@@ -633,14 +670,14 @@ const resources = {
+         back_to_cpa: '返回CPA',
+         back_to_cpa_aria: '返回CPA管理界面',
+         tabs_aria_label: '用量页面分区',
+-        tab_overview: '概览',
+-        tab_analysis: '分析',
+-        tab_events: '请求事件',
+-        tab_auth_files: '认证文件',
+-        tab_ai_provider: 'AI 供应商',
+-        tab_settings: '设置',
+-        tab_pricing: '定价',
+-        range_filter: '范围',
++        tab_overview: '总体情况',
++        tab_analysis: '详细分析',
++        tab_events: '每次请求',
++        tab_auth_files: '登录账号',
++        tab_ai_provider: '服务商账号',
++        tab_settings: '后台设置',
++        tab_pricing: '价格设置',
++        range_filter: '查看时间',
+         api_key_filter: 'API Key',
+         api_key_filter_all: '全部',
+         range_all: '全部',
+@@ -658,73 +695,89 @@ const resources = {
+         custom_invalid: '开始日期不能晚于结束日期',
+         custom_incomplete: '请选择完整的开始和结束日期',
+         no_data: '暂无数据',
+-        overview_realtime_section_title: '实时指标',
+-        overview_realtime_window: '实时窗口',
+-        overview_realtime_token_velocity: 'Token 速度',
+-        overview_realtime_ttft_distribution: 'TTFT 分布',
+-        overview_realtime_latency_distribution: 'Latency 分布',
+-        overview_realtime_current_usage: 'Token 占比',
+-        overview_realtime_request_level: '请求水平',
+-        overview_realtime_cache_level: '缓存水平',
+-        overview_realtime_latest: '当前',
+-        overview_realtime_average: '均值',
+-        overview_realtime_trend: '趋势',
+-        overview_realtime_tpm: 'Tokens/min',
+-        overview_realtime_rpm: 'Requests/min',
+-        overview_realtime_cache_rate: '缓存率',
+-        overview_realtime_ttft_average: 'TTFT 均值',
+-        overview_realtime_latency_average: 'Latency 均值',
+-        overview_realtime_token_empty: '暂无 Token 流量',
+-        overview_realtime_request_empty: '暂无请求流量',
+-        overview_realtime_ttft_empty: '暂无 TTFT 样本',
+-        overview_realtime_latency_empty: '暂无 Latency 样本',
+-        overview_realtime_cache_empty: '暂无可计算的缓存率',
+-        overview_realtime_usage_empty: '暂无使用占比数据',
+-        overview_realtime_rolling_metric_hint: '当前值、均值和趋势均基于所选窗口的滑动聚合。',
+-        overview_realtime_tokens_label: 'Tokens',
++        overview_realtime_section_title: '最近使用情况',
++        overview_realtime_window: '选择最近时段',
++        overview_realtime_token_velocity: '每分钟总用量',
++        overview_realtime_ttft_distribution: '开始回复等待时间',
++        overview_realtime_latency_distribution: '整次请求耗时',
++        overview_realtime_current_usage: '用量由谁产生（Token）',
++        overview_realtime_request_level: '每分钟请求数',
++        overview_realtime_cache_level: '重复内容复用比例',
++        overview_realtime_latest: '刚刚',
++        overview_realtime_average: '这段时间平均',
++        overview_realtime_trend: '前后变化',
++        overview_realtime_tpm: '每分钟总用量（Token）',
++        overview_realtime_rpm: '每分钟请求数',
++        overview_realtime_cache_rate: '复用比例',
++        overview_realtime_ttft_average: '平均开始回复时间',
++        overview_realtime_latency_average: '平均整次耗时',
++        overview_realtime_token_empty: '这段时间没有用量',
++        overview_realtime_request_empty: '这段时间没有请求',
++        overview_realtime_ttft_empty: '没有开始回复时间数据',
++        overview_realtime_latency_empty: '没有整次耗时数据',
++        overview_realtime_cache_empty: '没有可计算的复用数据',
++        overview_realtime_usage_empty: '还没有用量数据',
++        overview_realtime_rolling_metric_hint: '“刚刚”和“平均”按所选时段滚动计算；“前后变化”比较这个时段的前半段和后半段。',
++        overview_realtime_window_15m: '近 15 分钟',
++        overview_realtime_window_30m: '近 30 分钟',
++        overview_realtime_window_60m: '近 1 小时',
++        overview_realtime_per_minute_value: '每分钟 {{value}}',
++        overview_realtime_tokens_label: '用量（Token）',
+         overview_realtime_requests_label: '请求',
+-        overview_realtime_cost_label: '成本',
++        overview_realtime_cost_label: '估算费用',
+         overview_realtime_dimension_models: '模型',
+         overview_realtime_dimension_api_keys: 'API Key',
+-        overview_realtime_dimension_auth_files: '认证文件',
+-        overview_realtime_dimension_ai_providers: 'AI 提供商',
+-        overview_realtime_load_failed: '实时概览加载失败',
+-        daily_average: '每日平均',
+-        daily_average_range: '范围 {{days}} 天',
+-        avg_requests: '平均请求',
+-        avg_tokens: '平均 Tokens',
+-        avg_cost: '平均费用',
++        overview_realtime_dimension_auth_files: '登录账号',
++        overview_realtime_dimension_ai_providers: '服务商账号',
++        overview_realtime_load_failed: '最近使用情况加载失败',
++        daily_average: '平均每天',
++        daily_average_range: '按 {{days}} 天计算',
++        avg_requests: '平均请求数',
++        avg_tokens: '平均用量（Token）',
++        avg_cost: '平均估算费用',
+         total_requests: '请求总数',
+         success_requests: '成功',
+         failed_requests: '失败',
+         avg_time: '平均耗时',
+         total_time: '总耗时',
+         time: '耗时',
+-        total_tokens: 'Token 总数',
+-        ttft: '首字延迟',
+-        ttft_hint: '首字延迟',
+-        speed: '生成速度',
+-        speed_hint: '首字后可见输出 token 的平均速度',
+-        speed_mode: '速度模式',
++        total_tokens: '总用量（Token）',
++        ttft: '开始回复',
++        ttft_hint: '从发出请求到收到第一个 Token 的时间',
++        speed: '回复速度',
++        speed_hint: '开始回复后，每秒生成多少个 Token',
++        speed_value: '每秒 {{value}} 个 Token',
++        speed_mode: '处理速度',
+         speed_mode_standard: '标准',
+         speed_mode_fast: '快速',
+         speed_mode_flex: '弹性',
+-        request_type: '类型',
+-        request_endpoint: '端点',
+-        cache_rate: '缓存率',
+-        cache_read_tokens: '缓存读取',
+-        cache_creation_tokens: '缓存写入',
+-        reasoning_tokens: '推理',
+-        reasoning_effort: '推理强度',
+-        reasoning_effort_hint: '推理强度',
+-        rpm: 'RPM',
+-        tpm: 'TPM',
+-        rpm_30m: 'RPM（30 分钟）',
+-        tpm_30m: 'TPM（30 分钟）',
+-        total_cost: '总成本',
+-        cost_need_price: '请先设置价格以计算成本',
+-        cost_no_data: '暂无成本数据',
+-        latency_unit_hint: '使用 {{field}}，单位 {{unit}}',
++        speed_mode_batch: '批量处理',
++        speed_mode_unknown: '其他（{{value}}）',
++        request_type: '请求方式',
++        request_type_sse: '流式回复（SSE）',
++        request_type_ws: '实时连接（WS）',
++        request_endpoint: 'API 路径',
++        cache_rate: '重复内容复用率',
++        cache_read_tokens: '已复用输入（Token）',
++        cache_creation_tokens: '新建缓存（Token）',
++        reasoning_tokens: '思考用量（Token）',
++        reasoning_effort: '思考程度',
++        reasoning_effort_hint: '模型为这次请求投入的思考程度',
++        reasoning_effort_none: '不额外思考',
++        reasoning_effort_minimal: '最少思考',
++        reasoning_effort_low: '较少思考',
++        reasoning_effort_medium: '正常思考',
++        reasoning_effort_high: '深入思考',
++        reasoning_effort_xhigh: '最深入思考',
++        reasoning_effort_unknown: '其他（{{value}}）',
++        rpm: '每分钟请求数',
++        tpm: '每分钟 Token 数',
++        rpm_30m: '最近 30 分钟每分钟请求数',
++        tpm_30m: '最近 30 分钟每分钟 Token 数',
++        total_cost: '估算费用（仅供参考）',
++        cost_need_price: '需要先设置模型单价才能估算费用',
++        cost_no_data: '暂无估算费用',
++        latency_unit_hint: '整次请求耗时，单位：{{unit}}（原始字段 {{field}}）',
+         duration_unit_ms: '毫秒',
+         duration_unit_s: '秒',
+         duration_unit_m: '分钟',
+@@ -734,52 +787,52 @@ const resources = {
+         clear_filters: '清除筛选',
+         export_csv: '导出 CSV',
+         export_json: '导出 JSON',
+-        request_events_title: '请求事件日志',
+-        request_events_subtitle: '筛选、查看并导出页面中各项聚合数据背后的原始请求事件。',
+-        request_events_showing: '显示 {{shown}} / {{total}}',
+-        request_events_filtered: '已筛选 {{count}} 条',
++        request_events_title: '每次请求明细',
++        request_events_subtitle: '查看每一次调用何时发生、是否成功、用了多少 Token 和多长时间。',
++        request_events_showing: '当前显示 {{shown}} / {{total}} 条',
++        request_events_filtered: '筛选后有 {{count}} 条',
+         request_events_filter_model: '模型',
+         request_events_filter_source: '来源',
+         request_events_filter_result: '结果',
+-        request_events_columns: '列',
+-        request_events_columns_all: '全部',
++        request_events_columns: '显示内容',
++        request_events_columns_all: '全部显示',
+         request_events_columns_count: '{{selected}}/{{total}}',
+-        request_events_filter_auth_index: '凭证',
+-        request_events_empty_title: '暂无请求事件',
+-        request_events_empty_desc: '开始产生流量后，请求事件会显示在这里。',
+-        request_events_no_result_title: '没有匹配的请求事件',
++        request_events_filter_auth_index: '登录账号',
++        request_events_empty_title: '还没有请求记录',
++        request_events_empty_desc: '客户端发出请求后，这里会显示每一次请求。',
++        request_events_no_result_title: '没有符合条件的请求',
+         request_events_no_result_desc: '可以尝试清除筛选条件或放宽筛选范围。',
+-        request_events_count: '本页 {{count}} 条事件',
+-        request_events_total_count: '共 {{count}} 条事件',
+-        request_events_rows_per_page: '大小',
+-        request_events_page_control: '分页（{{page}}/{{totalPages}}）',
++        request_events_count: '本页 {{count}} 条请求',
++        request_events_total_count: '共 {{count}} 条请求',
++        request_events_rows_per_page: '每页条数',
++        request_events_page_control: '页数（{{page}}/{{totalPages}}）',
+         request_events_page_label: '第 {{page}} / {{totalPages}} 页',
+         request_events_page_empty: '第 0 / 0 页',
+         request_events_previous_page: '上一页',
+         request_events_next_page: '下一页',
+         request_events_timestamp: '时间',
+         request_events_source: '来源',
+-        request_events_auth_index: '凭证',
++        request_events_auth_index: '登录账号',
+         request_events_result: '结果',
+-        request_events_log_title: '请求日志',
+-        request_events_log_too_large_title: '请求日志过大',
+-        request_events_log_hint: '点击查看请求日志',
+-        request_events_log_open_aria: '{{result}}。查看请求日志',
+-        request_events_log_loading_aria: '{{result}}。正在加载请求日志',
+-        request_events_log_download: '下载原始日志',
++        request_events_log_title: '这次请求的原始记录',
++        request_events_log_too_large_title: '这次请求的记录太大',
++        request_events_log_hint: '点击查看这次请求的原始记录',
++        request_events_log_open_aria: '{{result}}。查看这次请求的原始记录',
++        request_events_log_loading_aria: '{{result}}。正在加载这次请求的原始记录',
++        request_events_log_download: '下载完整记录',
+         request_events_log_copy_section: '复制{{section}}',
+         request_events_log_copied_section: '已复制{{section}}',
+         request_events_log_copy_failed_section: '无法复制{{section}}',
+-        request_events_log_section: '日志段落',
+-        request_events_log_section_request_info: '请求信息',
+-        request_events_log_section_headers: '请求头',
+-        request_events_log_section_api_request: 'API 请求',
+-        request_events_log_section_api_response: 'API 响应',
+-        request_events_log_section_api_response_error: 'API 响应错误',
+-        request_events_log_section_response: '最终响应',
+-        request_events_log_section_websocket_timeline: 'WebSocket 时间线',
+-        request_events_log_section_api_websocket_timeline: 'API WebSocket 时间线',
+-        request_events_log_section_raw_log: '原始日志',
++        request_events_log_section: '记录内容',
++        request_events_log_section_request_info: '基本信息',
++        request_events_log_section_headers: '请求附带信息（Headers）',
++        request_events_log_section_api_request: '发给 API 的内容',
++        request_events_log_section_api_response: 'API 返回内容',
++        request_events_log_section_api_response_error: 'API 返回的错误',
++        request_events_log_section_response: '客户端收到的内容',
++        request_events_log_section_websocket_timeline: '实时连接过程（WebSocket）',
++        request_events_log_section_api_websocket_timeline: 'API 实时连接过程（WebSocket）',
++        request_events_log_section_raw_log: '完整原始记录',
+         request_events_log_empty: '暂无日志内容。',
+         request_events_log_missing_event: '该事件无法打开。',
+         request_events_log_unavailable: 'CPA 尚未生成该日志，或日志已经被清理。',
+@@ -788,20 +841,20 @@ const resources = {
+         model_name: '模型',
+         model_alias: '模型别名',
+         source_name: '来源',
+-        auth_index: '认证索引',
++        auth_index: '凭据编号',
+         result: '结果',
+         success: '成功',
+         failure: '失败',
+         deleted: '已删除',
+-        requests_count: '请求数',
+-        tokens_count: 'Token 数',
+-        input_tokens: '输入',
+-        output_tokens: '输出',
+-        latency: '总延迟',
+-        credential_stats: '凭证统计',
+-        credential_name: '凭证',
+-        credentials_count: '{{count}} 个凭证',
+-        credentials_filter_aria_label: '凭证供应商筛选',
++        requests_count: '请求次数',
++        tokens_count: '使用量（Token）',
++        input_tokens: '发送内容（Token）',
++        output_tokens: '回复内容（Token）',
++        latency: '整次耗时',
++        credential_stats: '账号使用情况',
++        credential_name: '登录账号',
++        credentials_count: '{{count}} 个账号',
++        credentials_filter_aria_label: '按服务商筛选账号',
+         credentials_filter_all: '全部',
+         credentials_filter_antigravity: 'Antigravity',
+         credentials_filter_claude: 'Claude',
+@@ -811,66 +864,66 @@ const resources = {
+         credentials_filter_iflow: 'iFlow',
+         credentials_filter_openai: 'OpenAI',
+         credentials_filter_xai: 'xAI',
+-        credentials_auth_files_title: '认证文件',
+-        credentials_auth_files_subtitle: '查看本地认证文件的请求活动及限额情况。',
+-        credentials_auth_files_empty: '当前页没有认证文件凭证。',
+-        credentials_auth_files_active_only: '仅启用',
+-        credentials_auth_files_display_mode_aria: '认证文件显示模式',
+-        credentials_auth_files_display_mode_quota: '限额',
+-        credentials_auth_files_display_mode_health: '健康',
++        credentials_auth_files_title: '登录账号',
++        credentials_auth_files_subtitle: '查看本机登录凭据的使用次数、剩余额度和是否可用。',
++        credentials_auth_files_empty: '这一页没有登录账号。',
++        credentials_auth_files_active_only: '只看启用账号',
++        credentials_auth_files_display_mode_aria: '选择查看剩余额度或账号状态',
++        credentials_auth_files_display_mode_quota: '剩余额度',
++        credentials_auth_files_display_mode_health: '是否可用',
+         credentials_column_name: '名称',
+-        credentials_column_quota: '限额',
+-        credentials_column_health: '健康',
+-        credentials_column_activity: '活动',
++        credentials_column_quota: '剩余额度',
++        credentials_column_health: '是否可用',
++        credentials_column_activity: '最近使用',
+         credentials_sort_label: '排序',
+-        credentials_sort_priority: '优先级',
+-        credentials_sort_total_requests: '请求总数',
+-        credentials_sort_total_tokens: 'Token 总数',
++        credentials_sort_priority: '使用顺序',
++        credentials_sort_total_requests: '请求次数',
++        credentials_sort_total_tokens: '使用量（Token）',
+         credentials_sort_last_used: '最后使用',
+-        credentials_ai_providers_title: 'AI 供应商',
+-        credentials_ai_providers_subtitle: '查看 AI 供应商的请求活动。',
+-        credentials_ai_providers_empty: '当前页没有 AI 供应商凭证。',
+-        credentials_quota_refresh_current_page: '更新限额',
+-        credentials_quota_reset_button: '重置限额，可用 {{count}} 次',
+-        credentials_quota_reset_title: '重置 Codex 限额',
++        credentials_ai_providers_title: '服务商账号',
++        credentials_ai_providers_subtitle: '查看各个 AI 服务商账号的使用情况。',
++        credentials_ai_providers_empty: '这一页没有服务商账号。',
++        credentials_quota_refresh_current_page: '更新剩余额度',
++        credentials_quota_reset_button: '恢复额度，可用 {{count}} 次',
++        credentials_quota_reset_title: '恢复 Codex 额度',
+         credentials_quota_reset_tooltip_suffix: '次重置机会',
+-        credentials_quota_reset_message: '当前有 {{count}} 次可用重置次数。是否消耗 1 次立即重置？',
++        credentials_quota_reset_message: '现在可以恢复 {{count}} 次额度。是否使用 1 次机会立即恢复？',
+         credentials_quota_reset_message_suffix: '次可用重置次数。',
+-        credentials_quota_reset_message_prompt: '是否消耗 1 次立即重置？',
+-        credentials_quota_reset_confirm: '确认重置',
+-        credentials_quota_reset_failed: '重置限额失败，请稍后重试。',
+-        credentials_quota_reset_expiry_title: '主动重置过期时间（GMT+8）',
++        credentials_quota_reset_message_prompt: '是否使用 1 次机会立即恢复？',
++        credentials_quota_reset_confirm: '确认恢复',
++        credentials_quota_reset_failed: '恢复额度失败，请稍后重试。',
++        credentials_quota_reset_expiry_title: '恢复机会失效时间（北京时间）',
+         credentials_quota_reset_expiry_loading: '正在获取过期时间…',
+         credentials_quota_reset_expiry_item: '第 {{index}} 次',
+         credentials_quota_reset_expiry_empty: '当前没有可用重置次数。',
+         credentials_quota_reset_expiry_failed: '过期时间获取失败，仍可按缓存次数继续重置。',
+-        credentials_quota_refreshing: '正在刷新限额',
+-        credentials_quota_loading: '正在查询限额',
+-        credentials_quota_unavailable: '暂无限额数据',
++        credentials_quota_refreshing: '正在更新剩余额度',
++        credentials_quota_loading: '正在查询剩余额度',
++        credentials_quota_unavailable: '暂无剩余额度数据',
+         credentials_quota_remaining: '剩余 {{count}}',
+         credentials_quota_percent_used: '已用 {{percent}}',
+-        credentials_refresh_status: '刷新',
+-        credentials_refresh_status_queued: '排队中',
+-        credentials_refresh_status_running: '运行中',
++        credentials_refresh_status: '更新状态',
++        credentials_refresh_status_queued: '等待更新',
++        credentials_refresh_status_running: '正在更新',
+         credentials_refresh_status_completed: '已完成',
+         credentials_refresh_status_failed: '失败',
+         credentials_refresh_error_unauthorized: '请重新登录后刷新限额。',
+-        credentials_refresh_error_duplicate: '该凭证的限额刷新正在运行。',
+-        credentials_refresh_error_duplicate_request: '该凭证已包含在本次刷新请求中。',
+-        credentials_refresh_error_not_auth_file: '限额刷新仅支持本地认证文件。',
+-        credentials_refresh_error_unsupported: '该凭证类型不支持限额刷新。',
+-        credentials_refresh_error_not_found: '该凭证已不可用。',
+-        credentials_refresh_error_invalid: '该凭证无法刷新。',
+-        credentials_refresh_error_failed: '限额刷新失败，请稍后重试。',
+-        credentials_inspection_open: '巡检',
+-        credentials_inspection_title: 'Auth Files 巡检',
+-        credentials_inspection_total: '可用账号总数',
+-        credentials_inspection_progress: '已巡检 / 总数',
+-        credentials_inspection_progress_aria: '巡检进度 {{progress}}%',
+-        credentials_inspection_completed_at: '巡检时间',
++        credentials_refresh_error_duplicate: '这个账号正在更新额度。',
++        credentials_refresh_error_duplicate_request: '这个账号已经在本次更新名单中。',
++        credentials_refresh_error_not_auth_file: '只有本机登录账号可以更新额度。',
++        credentials_refresh_error_unsupported: '这种账号不能更新额度。',
++        credentials_refresh_error_not_found: '这个账号已经找不到。',
++        credentials_refresh_error_invalid: '这个账号无法更新。',
++        credentials_refresh_error_failed: '更新额度失败，请稍后重试。',
++        credentials_inspection_open: '检查账号',
++        credentials_inspection_title: '登录账号批量检查',
++        credentials_inspection_total: '可用账号',
++        credentials_inspection_progress: '已检查 / 总数',
++        credentials_inspection_progress_aria: '检查进度 {{progress}}%',
++        credentials_inspection_completed_at: '检查时间',
+         credentials_inspection_not_completed: '尚未完成',
+-        credentials_inspection_start: '开始巡检',
+-        credentials_inspection_running: '巡检中',
++        credentials_inspection_start: '开始检查',
++        credentials_inspection_running: '正在检查',
+         credentials_auto_refresh_settings: '定时刷新设置',
+         credentials_auto_refresh_enabled: '定时刷新',
+         credentials_auto_refresh_save: '保存',
+@@ -899,14 +952,14 @@ const resources = {
+         credentials_auto_refresh_load_failed: '加载定时刷新设置失败。',
+         credentials_auto_refresh_save_failed: '保存定时刷新设置失败。',
+         credentials_inspection_normal: '正常',
+-        credentials_inspection_limit_reached: '达到限额',
++        credentials_inspection_limit_reached: '额度已用完',
+         credentials_inspection_401: '401',
+         credentials_inspection_402: '402',
+         credentials_inspection_401_402: '401/402',
+-        credentials_inspection_other_failed: '其它失败',
++        credentials_inspection_other_failed: '其他错误',
+         credentials_inspection_unknown: '未知',
+-        credentials_inspection_recent_results: '最近结果',
+-        credentials_inspection_empty_results: '暂无巡检结果。',
++        credentials_inspection_recent_results: '最近检查结果',
++        credentials_inspection_empty_results: '还没有检查结果。',
+         credentials_inspection_disable_invalid: '禁用无效账号',
+         credentials_inspection_delete_invalid: '删除无效账号',
+         credentials_inspection_disable_action: '禁用',
+@@ -921,29 +974,42 @@ const resources = {
+         credentials_inspection_invalid_accounts_sync_tip: '账号状态从 CPA 同步到 Keeper 可能存在短暂延迟。操作后如果列表暂未更新，请稍候再手动刷新。',
+         credentials_quota_window_usage_aria: 'Token：{{tokens}}，成本：{{cost}}',
+         credentials_quota_billing_usage_aria: '花费：{{used}} / {{limit}}，剩余：{{remaining}}',
+-        credentials_quota_usage_mode_label: '限额用量',
+-        credentials_quota_usage_mode_aria: '限额用量显示模式',
+-        credentials_quota_usage_mode_current: '当前',
+-        credentials_quota_usage_mode_estimated: '预估',
++        credentials_quota_usage_mode_label: '额度算法',
++        credentials_quota_usage_mode_aria: '选择查看实际额度或估算额度',
++        credentials_quota_usage_mode_current: '实际',
++        credentials_quota_usage_mode_estimated: '估算',
++        credentials_quota_label_5h: '5 小时额度',
++        credentials_quota_label_weekly: '每周额度',
++        credentials_quota_label_monthly: '每月额度',
++        credentials_quota_label_primary: '主要额度',
++        credentials_quota_label_secondary: '次要额度',
++        credentials_quota_label_code_review: '代码审查',
++        credentials_quota_label_monthly_spend: '每月消费额度',
++        credentials_quota_label_pay_as_you_go: '按量付费额度',
++        credentials_quota_label_code_assist_credit: '代码助手额度',
++        credentials_quota_label_usage: '用量',
++        credentials_quota_label_prefixed: '{{prefix}} · {{period}}',
++        credentials_quota_reset_duration_days: '{{days}}天 {{hours}}小时 {{minutes}}分钟',
++        credentials_quota_reset_duration_hours: '{{hours}}小时 {{minutes}}分钟',
+         credentials_last_used: '最后使用',
+-        credentials_stats_updated: '统计更新',
++        credentials_stats_updated: '数据更新',
+         credentials_health_last_5h: '最近 5 小时',
+         credentials_health_ok: '成功',
+         credentials_health_fail: '失败',
+-        credentials_health_status_success: '健康',
+-        credentials_health_status_warning: '部分失败',
+-        credentials_health_status_failure: '失败',
+-        credentials_health_status_empty: '无数据',
+-        credentials_health_summary_healthy: '健康',
+-        credentials_health_summary_degraded: '异常',
+-        credentials_health_summary_quiet: '安静',
++        credentials_health_status_success: '可用',
++        credentials_health_status_warning: '有部分请求失败',
++        credentials_health_status_failure: '不可用',
++        credentials_health_status_empty: '还没有数据',
++        credentials_health_summary_healthy: '可用',
++        credentials_health_summary_degraded: '有失败',
++        credentials_health_summary_quiet: '暂无请求',
+         credentials_health_no_failures_5h: '5 小时内无失败',
+         credentials_health_no_requests_5h: '5 小时内无请求',
+         credentials_health_last_failure: '最近失败 {{timeRange}}',
+         credentials_health_time_summary: '使用 {{lastUsed}} · 更新 {{statsUpdated}}',
+         credentials_health_time_summary_used: '使用 {{lastUsed}}',
+         credentials_health_time_summary_updated: '更新 {{statsUpdated}}',
+-        credentials_health_grid_aria: '{{name}} 最近 5 小时请求健康图',
++        credentials_health_grid_aria: '{{name}} 最近 5 小时请求是否正常',
+         credentials_health_bucket_aria: '{{timeRange}}：{{status}}，成功 {{successCount}}，失败 {{failureCount}}，{{rate}}',
+         credentials_alias_edit: '编辑别名',
+         credentials_alias_save: '保存别名',
+@@ -958,11 +1024,11 @@ const resources = {
+         success_count: '成功',
+         failure_count: '失败',
+         success_rate: '成功率',
+-        api_endpoint: 'API',
+-        api_key_settings_title: 'API Key 设置',
+-        api_key_settings_subtitle: '为已同步的 CPA API Key 设置展示别名。',
++        api_endpoint: 'API 路径',
++        api_key_settings_title: 'API Key 名称设置',
++        api_key_settings_subtitle: '给已经同步的 CPA API Key 设置一个容易识别的名称。',
+         api_key_settings_empty: '暂无已同步的 CPA API Key。',
+-        api_key_settings_id: '本地 ID',
++        api_key_settings_id: '本机编号',
+         api_key_settings_display_key: 'API Key',
+         api_key_settings_alias: '别名',
+         api_key_settings_saving: '保存中',
+@@ -974,43 +1040,46 @@ const resources = {
+         api_key_settings_copy_failed: '无法复制 API Key，需要时可手动选择复制。',
+         api_key_settings_alias_save_success: 'API Key 别名已保存。',
+         api_key_settings_alias_save_failed: '无法保存 API Key 别名。',
+-        session_settings_title: 'Session 管理',
+-        session_settings_subtitle: '查看当前有效的仪表盘 session，并退出不需要的访问。',
+-        session_settings_empty: '暂无有效 session。',
+-        session_settings_admin_label: 'Admin Session',
++        session_settings_title: '登录设备管理',
++        session_settings_subtitle: '查看哪些设备仍登录着这个后台，并退出不再使用的登录。',
++        session_settings_empty: '目前没有有效登录。',
++        session_settings_admin_label: '管理员登录',
+         session_settings_unknown_api_key: '未知 API Key',
+-        session_settings_type_admin: 'Admin',
+-        session_settings_type_api_key: 'API Key',
+-        session_settings_source_standard: '独立访问',
+-        session_settings_source_embed: 'CPAMC 嵌入',
+-        session_settings_current: '当前',
+-        session_settings_login_at: '登录：{{value}}',
+-        session_settings_expires_at: '过期：{{value}}',
+-        session_settings_logout_one: '退出这个 session',
++        session_settings_type_admin: '管理员',
++        session_settings_type_api_key: 'API Key 查看',
++        session_settings_source_standard: '直接打开网页',
++        session_settings_source_embed: '从 CPAMC 打开',
++        session_settings_current: '当前设备',
++        session_settings_login_at: '登录时间：{{value}}',
++        session_settings_expires_at: '自动退出时间：{{value}}',
++        session_settings_logout_one: '退出这个设备',
+         session_settings_logging_out: '退出中',
+         session_settings_logout_confirm: '退出登录',
+-        session_settings_admin_logout_title: '退出这个 admin session？',
+-        session_settings_admin_logout_body: '这只会退出这个 admin session，其他 admin session 不受影响。',
+-        session_settings_api_key_logout_title: '退出 API Key session？',
+-        session_settings_api_key_logout_body: '这只会退出 {{label}} 的这个 API Key session，其他 session 不受影响。',
+-        session_settings_logout_success: 'Session 已退出。',
+-        session_settings_logout_failed: '无法退出 session。',
++        session_settings_admin_logout_title: '让这个管理员设备退出？',
++        session_settings_admin_logout_body: '只会退出这个设备，其他管理员设备不会受影响。',
++        session_settings_api_key_logout_title: '让这个 API Key 设备退出？',
++        session_settings_api_key_logout_body: '只会退出 {{label}} 的这个设备，其他设备不会受影响。',
++        session_settings_logout_success: '这个设备已退出。',
++        session_settings_logout_failed: '无法让这个设备退出。',
+         logout_confirm_title: '退出登录？',
+-        logout_confirm_body: '这会退出当前设备上的当前 session。',
++        logout_confirm_body: '这会让当前设备退出后台。',
+         logout_confirm_action: '退出登录',
+         model_price_settings: '价格设置',
+         model_price_settings_title: '模型价格设置',
+-        model_price_settings_subtitle: '配置每个模型的 token 单价，用于成本统计。',
++        model_price_settings_subtitle: '设置每个模型的 Token 单价，用来估算费用。',
+         model_price_select_placeholder: '选择模型',
+         model_price_configured: '已设置',
+-        model_price_style: '计价风格',
++        model_price_style: '计价方式',
+         model_price_style_openai: 'OpenAI',
+         model_price_style_claude: 'Claude',
+-        model_price_prompt: '输入',
+-        model_price_completion: '输出',
+-        model_price_cache_read: '缓存读取',
+-        model_price_cache_write: '缓存写入',
+-        model_price_multiplier: '倍率',
++        model_price_prompt: '发送内容（Token）',
++        model_price_completion: '回复内容（Token）',
++        model_price_cache_read: '已复用输入（Token）',
++        model_price_cache_write: '新建缓存（Token）',
++        model_price_multiplier: '价格倍数',
++        model_price_field_with_unit: '{{label}}（{{unit}}）',
++        model_price_unit_per_million: '美元 / 每 100 万 Token',
++        model_price_value_per_million: '每 100 万 Token {{value}}',
+         saved_prices: '已保存价格',
+         model_price_empty: '暂无已保存价格',
+         model_price_save_success: '模型价格已保存。',
+@@ -1029,6 +1098,11 @@ const resources = {
+         model_price_sync_unmatched: '未匹配',
+         model_price_sync_matched_model: '匹配到：{{model}}',
+         model_price_sync_provider: '提供商：{{provider}}（{{id}}）',
++        model_price_match_exact: '名称完全匹配',
++        model_price_match_suffix: '去掉前缀后完全匹配',
++        model_price_match_normalized: '名称写法相同',
++        model_price_match_normalized_suffix: '去掉前缀后写法相同',
++        model_price_match_other: '其他匹配（{{value}}）',
+         model_price_sync_existing: '当前已有',
+         model_price_sync_toggle: '选择 {{model}}',
+         model_price_sync_select_all: '全选',
+@@ -1041,51 +1115,51 @@ const resources = {
+         model_price_sync_apply_success: '已更新 {{count}} 个模型价格。',
+         model_price_sync_apply_partial: '已更新 {{success}} 个模型价格，{{failed}} 个失败。',
+         model_price_sync_failed_label: '{{model}} 价格同步失败。',
+-        service_health: '服务健康',
+-        service_health_title: '请求健康时间线',
+-        service_health_subtitle: '用紧凑的可靠性条带展示当前筛选范围内的请求结果，时间线最多展示 7 天细节。',
++        service_health: '请求是否正常',
++        service_health_title: '请求成功和失败记录',
++        service_health_subtitle: '按时间查看请求成功或失败；最多显示最近 7 天。',
+         service_health_window: '最近 7 天',
+         service_health_oldest: '最早',
+         service_health_newest: '最新',
+         service_health_block_label: '{{timeRange}}：{{summary}}',
+-        healthy: '健康',
+-        unhealthy: '异常',
++        healthy: '正常',
++        unhealthy: '有失败',
+         theme_light: '浅色',
+         theme_dark: '深色',
+         theme_auto: '自动',
+         theme_switch: '主题切换',
+         language_switch: '语言切换',
+-        analysis_token_usage_title: 'Token 用量趋势',
+-        analysis_token_usage_subtitle: '按时间展示输入、输出、缓存、推理 Token，并叠加请求和花费趋势。',
++        analysis_token_usage_title: '用量变化（Token）',
++        analysis_token_usage_subtitle: '查看发送内容、回复内容、重复内容复用和思考用量随时间如何变化，也会同时显示请求次数和费用。',
+         analysis_token_average: '平均值',
+-        analysis_cost_breakdown_title: '成本拆分',
+-        analysis_cost_breakdown_subtitle: '按当前模型价格拆分输入、输出和缓存花费。',
+-        analysis_cost_per_million_tokens: '每 1M Token 成本',
+-        analysis_blended_rate: '混合费率',
+-        analysis_cost_share: '成本占比',
+-        analysis_latency_title: '延迟诊断',
+-        analysis_latency_subtitle: '按请求样本查看首字延迟和总延迟。',
++        analysis_cost_breakdown_title: '估算费用花在哪里',
++        analysis_cost_breakdown_subtitle: '按设置的模型单价估算，仅供参考；查看发送内容、回复内容和重复内容复用各占多少。',
++        analysis_cost_per_million_tokens: '每 100 万 Token 估算费用',
++        analysis_blended_rate: '平均单价',
++        analysis_cost_share: '费用占比',
++        analysis_latency_title: '回复速度分析',
++        analysis_latency_subtitle: '查看每次请求等多久开始回复，以及全部完成花了多久。',
+         analysis_latency_samples: '请求样本',
+         analysis_latency_samples_count: '样本数',
+-        analysis_latency_sampled: '已抽样展示',
+-        analysis_latency_p95_ttft: 'p95 首字延迟',
+-        analysis_latency_p95_latency: 'p95 总延迟',
+-        analysis_model_efficiency_title: '模型效率',
+-        analysis_model_efficiency_subtitle: '按模型对比每 1M Total Token 成本。',
+-        analysis_composition_title: '用量分布',
+-        analysis_composition_subtitle: '切换维度，对比 Token 占比、花费和请求量。',
++        analysis_latency_sampled: '数据太多，已选取部分显示',
++        analysis_latency_p95_ttft: '95% 的请求在此时间内开始回复',
++        analysis_latency_p95_latency: '95% 的请求在此时间内全部完成',
++        analysis_model_efficiency_title: '各模型费用对比',
++        analysis_model_efficiency_subtitle: '同样使用 100 万 Token 时，对比各模型大约花多少钱。',
++        analysis_composition_title: '用量来自哪里',
++        analysis_composition_subtitle: '按 API Key、模型或登录账号查看 Token 用量、费用和请求次数。',
+         analysis_composition_api_key_tab: 'API Key',
+         analysis_composition_model_tab: '模型',
+-        analysis_composition_auth_files_tab: '认证文件',
+-        analysis_composition_ai_provider_tab: 'AI 供应商',
++        analysis_composition_auth_files_tab: '登录账号',
++        analysis_composition_ai_provider_tab: '服务商账号',
+         analysis_composition_name: '名称',
+-        analysis_composition_token_percent: 'Token %',
+-        analysis_heatmap_title: 'API Key 与模型热力图',
+-        analysis_heatmap_subtitle: '展示 API Key 与模型组合下的 Token 分布，悬浮查看明细。',
++        analysis_composition_token_percent: '用量占比（Token）',
++        analysis_heatmap_title: 'API Key 和模型用量对照',
++        analysis_heatmap_subtitle: '查看每个 API Key 分别用了哪些模型以及用了多少 Token，鼠标移上去可看明细。',
+         analysis_heatmap_api_key: 'API Key',
+-        analysis_heatmap_low: '低',
+-        analysis_heatmap_high: '高',
+-        analysis_heatmap_legend: '热力强度示例',
++        analysis_heatmap_low: '用量少',
++        analysis_heatmap_high: '用量多',
++        analysis_heatmap_legend: '颜色深浅表示用量多少',
+         analysis_others: '其他'
+       }
+     }
+@@ -1217,6 +1291,10 @@ const resources = {
+         overview_realtime_cache_empty: '暫無可計算的快取率',
+         overview_realtime_usage_empty: '暫無使用占比資料',
+         overview_realtime_rolling_metric_hint: '目前值、均值和趨勢均基於所選視窗的滑動聚合。',
++        overview_realtime_window_15m: '近 15 分鐘',
++        overview_realtime_window_30m: '近 30 分鐘',
++        overview_realtime_window_60m: '近 1 小時',
++        overview_realtime_per_minute_value: '每分鐘 {{value}}',
+         overview_realtime_tokens_label: 'Tokens',
+         overview_realtime_requests_label: '請求',
+         overview_realtime_cost_label: '成本',
+@@ -1241,11 +1319,16 @@ const resources = {
+         ttft_hint: '首字延遲',
+         speed: '生成速度',
+         speed_hint: '首字後可見輸出 token 的平均速度',
++        speed_value: '每秒 {{value}} 個 Token',
+         speed_mode: '速度模式',
+         speed_mode_standard: '標準',
+         speed_mode_fast: '快速',
+         speed_mode_flex: '彈性',
++        speed_mode_batch: '批次處理',
++        speed_mode_unknown: '其他（{{value}}）',
+         request_type: '類型',
++        request_type_sse: '串流回覆（SSE）',
++        request_type_ws: '即時連線（WS）',
+         request_endpoint: '端點',
+         cache_rate: '快取率',
+         cache_read_tokens: '快取讀取',
+@@ -1253,6 +1336,13 @@ const resources = {
+         reasoning_tokens: '推理',
+         reasoning_effort: '推理強度',
+         reasoning_effort_hint: '推理強度',
++        reasoning_effort_none: '不額外思考',
++        reasoning_effort_minimal: '最少思考',
++        reasoning_effort_low: '較少思考',
++        reasoning_effort_medium: '正常思考',
++        reasoning_effort_high: '深入思考',
++        reasoning_effort_xhigh: '最深入思考',
++        reasoning_effort_unknown: '其他（{{value}}）',
+         rpm: 'RPM',
+         tpm: 'TPM',
+         rpm_30m: 'RPM（30 分鐘）',
+@@ -1461,6 +1551,19 @@ const resources = {
+         credentials_quota_usage_mode_aria: '限額用量顯示模式',
+         credentials_quota_usage_mode_current: '目前',
+         credentials_quota_usage_mode_estimated: '預估',
++        credentials_quota_label_5h: '5 小時額度',
++        credentials_quota_label_weekly: '每週額度',
++        credentials_quota_label_monthly: '每月額度',
++        credentials_quota_label_primary: '主要額度',
++        credentials_quota_label_secondary: '次要額度',
++        credentials_quota_label_code_review: '程式碼審查',
++        credentials_quota_label_monthly_spend: '每月消費額度',
++        credentials_quota_label_pay_as_you_go: '按量付費額度',
++        credentials_quota_label_code_assist_credit: '程式碼助手額度',
++        credentials_quota_label_usage: '用量',
++        credentials_quota_label_prefixed: '{{prefix}} · {{period}}',
++        credentials_quota_reset_duration_days: '{{days}}天 {{hours}}小時 {{minutes}}分鐘',
++        credentials_quota_reset_duration_hours: '{{hours}}小時 {{minutes}}分鐘',
+         credentials_last_used: '最後使用',
+         credentials_stats_updated: '統計更新',
+         credentials_health_last_5h: '最近 5 小時',
+@@ -1547,6 +1650,9 @@ const resources = {
+         model_price_cache_read: '快取讀取',
+         model_price_cache_write: '快取寫入',
+         model_price_multiplier: '倍率',
++        model_price_field_with_unit: '{{label}}（{{unit}}）',
++        model_price_unit_per_million: '美元 / 每 100 萬 Token',
++        model_price_value_per_million: '每 100 萬 Token {{value}}',
+         saved_prices: '已儲存價格',
+         model_price_empty: '尚無已儲存價格',
+         model_price_save_success: '模型價格已儲存。',
+@@ -1565,6 +1671,11 @@ const resources = {
+         model_price_sync_unmatched: '未匹配',
+         model_price_sync_matched_model: '匹配到：{{model}}',
+         model_price_sync_provider: '提供商：{{provider}}（{{id}}）',
++        model_price_match_exact: '名稱完全匹配',
++        model_price_match_suffix: '移除前綴後完全匹配',
++        model_price_match_normalized: '名稱寫法相同',
++        model_price_match_normalized_suffix: '移除前綴後寫法相同',
++        model_price_match_other: '其他匹配（{{value}}）',
+         model_price_sync_existing: '目前已有',
+         model_price_sync_toggle: '選擇 {{model}}',
+         model_price_sync_select_all: '全選',
+diff --git a/web/src/i18n/plainChinese.test.ts b/web/src/i18n/plainChinese.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..34b2d9d499ed4460a9b664da0a39c7f40fb9904c
+--- /dev/null
++++ b/web/src/i18n/plainChinese.test.ts
+@@ -0,0 +1,63 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import i18n from '@/i18n';
++import { formatCompactNumber, formatCompactTokenValue, formatDurationMs } from '@/utils/usage';
++
++describe('plain Simplified Chinese display', () => {
++  const previousLanguage = i18n.resolvedLanguage || i18n.language;
++
++  beforeAll(async () => {
++    await i18n.changeLanguage('zh');
++  });
++
++  afterAll(async () => {
++    await i18n.changeLanguage(previousLanguage);
++  });
++
++  it('uses plain Simplified Chinese and keeps technical identifiers in parentheses', () => {
++    expect(i18n.t('usage_stats.tab_overview')).toBe('总体情况');
++    expect(i18n.t('usage_stats.tab_events')).toBe('每次请求');
++    expect(i18n.t('usage_stats.tab_auth_files')).toBe('登录账号');
++    expect(i18n.t('usage_stats.session_settings_title')).toBe('登录设备管理');
++    expect(i18n.t('usage_stats.total_tokens')).toBe('总用量（Token）');
++    expect(i18n.t('usage_stats.total_cost')).toBe('估算费用（仅供参考）');
++  });
++
++  it('explains realtime windows, rates and reasoning levels without raw shorthand', () => {
++    expect(i18n.t('usage_stats.overview_realtime_tpm')).toBe('每分钟总用量（Token）');
++    expect(i18n.t('usage_stats.overview_realtime_window_15m')).toBe('近 15 分钟');
++    expect(i18n.t('usage_stats.overview_realtime_window_60m')).toBe('近 1 小时');
++    expect(i18n.t('usage_stats.overview_realtime_per_minute_value', { value: '2万' })).toBe('每分钟 2万');
++    expect(i18n.t('usage_stats.speed_value', { value: '12.5' })).toBe('每秒 12.5 个 Token');
++    expect(i18n.t('usage_stats.reasoning_effort_low')).toBe('较少思考');
++    expect(i18n.t('usage_stats.reasoning_effort_medium')).toBe('正常思考');
++    expect(i18n.t('usage_stats.reasoning_effort_high')).toBe('深入思考');
++    expect(i18n.t('usage_stats.reasoning_effort_unknown', { value: 'ultra' })).toBe('其他（ultra）');
++    expect(i18n.t('usage_stats.speed_mode_batch')).toBe('批量处理');
++    expect(i18n.t('usage_stats.request_type_sse')).toBe('流式回复（SSE）');
++    expect(i18n.t('usage_stats.request_type_ws')).toBe('实时连接（WS）');
++    expect(i18n.t('usage_stats.analysis_latency_p95_ttft')).toBe('95% 的请求在此时间内开始回复');
++    expect(i18n.t('usage_stats.analysis_latency_p95_latency')).toBe('95% 的请求在此时间内全部完成');
++  });
++
++  it('uses readable quota periods, countdowns and price units', () => {
++    expect(i18n.t('usage_stats.credentials_quota_label_5h')).toBe('5 小时额度');
++    expect(i18n.t('usage_stats.credentials_quota_label_weekly')).toBe('每周额度');
++    expect(i18n.t('usage_stats.credentials_quota_reset_duration_days', {
++      days: '2',
++      hours: '3',
++      minutes: '4',
++    })).toBe('2天 3小时 4分钟');
++    expect(i18n.t('usage_stats.model_price_unit_per_million')).toBe('美元 / 每 100 万 Token');
++    expect(i18n.t('usage_stats.model_price_match_exact')).toBe('名称完全匹配');
++  });
++
++  it('uses Chinese large-number and duration units', () => {
++    expect(formatCompactNumber(1_200)).toBe('1,200');
++    expect(formatCompactNumber(12_000)).toBe('1.2万');
++    expect(formatCompactNumber(125_000_000)).toBe('1.25亿');
++    expect(formatCompactTokenValue(20_000, true)).toBe('2万 个 Token');
++    expect(formatDurationMs(850)).toBe('850毫秒');
++    expect(formatDurationMs(1_500)).toBe('1.5秒');
++    expect(formatDurationMs(61_000)).toBe('1分钟 01秒');
++  });
++});
+diff --git a/web/src/i18n/test/cache-token-labels.test.ts b/web/src/i18n/test/cache-token-labels.test.ts
+index 25d78984a737c05bd89969533ad4518335e8707d..c0ebc1de8968ff9370b95e1df8a8034509e99e47 100644
+--- a/web/src/i18n/test/cache-token-labels.test.ts
++++ b/web/src/i18n/test/cache-token-labels.test.ts
+@@ -5,8 +5,8 @@ describe('cache token labels', () => {
+   it('provides cache read and cache write labels in every supported language', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.cache_read_tokens')).toBe('Cache Read');
+     expect(i18n.getResource('en', 'translation', 'usage_stats.cache_creation_tokens')).toBe('Cache Write');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.cache_read_tokens')).toBe('缓存读取');
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.cache_creation_tokens')).toBe('缓存写入');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.cache_read_tokens')).toBe('已复用输入（Token）');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.cache_creation_tokens')).toBe('新建缓存（Token）');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.cache_read_tokens')).toBe('快取讀取');
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.cache_creation_tokens')).toBe('快取寫入');
+   });
+diff --git a/web/src/i18n/test/reset-credit-expiry.test.ts b/web/src/i18n/test/reset-credit-expiry.test.ts
+index 0439a3cbd88cb86027077bb8b78438a6c645a44a..31f14c33b1f1f3b6050e1cc1b8598ca0880cbff5 100644
+--- a/web/src/i18n/test/reset-credit-expiry.test.ts
++++ b/web/src/i18n/test/reset-credit-expiry.test.ts
+@@ -5,7 +5,7 @@ describe('reset credit expiry labels', () => {
+   it('provides expiry and fallback labels in every supported language', () => {
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_quota_reset_expiry_title')).toBe('Manual reset expiry (GMT+8)')
+     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_quota_reset_expiry_failed')).toBe('Could not load expiry times. You can still reset using the cached count.')
+-    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_expiry_title')).toBe('主动重置过期时间（GMT+8）')
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_expiry_title')).toBe('恢复机会失效时间（北京时间）')
+     expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_expiry_failed')).toBe('过期时间获取失败，仍可按缓存次数继续重置。')
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_expiry_title')).toBe('主動重置過期時間（GMT+8）')
+     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_expiry_failed')).toBe('到期時間取得失敗，仍可依快取次數繼續重置。')
+diff --git a/web/src/test/indexHtml.test.ts b/web/src/test/indexHtml.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a491f868c34ae3223622c417220e9a34f814839a
+--- /dev/null
++++ b/web/src/test/indexHtml.test.ts
+@@ -0,0 +1,14 @@
++import { readFileSync } from 'node:fs';
++import { describe, expect, it } from 'vitest';
++
++describe('static /usage entry page', () => {
++  it('uses a Chinese title and keeps both base-path placeholders for deployment', () => {
++    const indexHtml = readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
++
++    expect(indexHtml).toContain('<html lang="zh-CN">');
++    expect(indexHtml).toContain('<title>Codex 中转使用情况</title>');
++    expect(indexHtml).toContain('<base href="__APP_BASE_PATH__/" />');
++    expect(indexHtml).toContain('window.localStorage.setItem(languageKey, "zh")');
++    expect(indexHtml).toContain('window.__APP_BASE_PATH__ = "__APP_BASE_PATH__";');
++  });
++});
+diff --git a/web/src/utils/usage.ts b/web/src/utils/usage.ts
+index 2c1c53f1ac070c09839ae676f7a19ee76fb63c37..325fa84ede3b5d3e108ed0abe797622d69ceacea 100644
+--- a/web/src/utils/usage.ts
++++ b/web/src/utils/usage.ts
+@@ -1,5 +1,6 @@
+ import type { UsageFilterWindow, UsageTimeRange } from '@/lib/types';
+ import type { UsagePayload } from '@/components/usage/hooks/useUsageData';
++import i18n from '@/i18n';
+ import {
+   LATENCY_SOURCE_FIELD,
+   LATENCY_SOURCE_UNIT,
+@@ -81,6 +82,24 @@ const toValidTimestamp = (value: unknown): number | null => {
+ export function formatCompactNumber(value: number): string {
+   const abs = Math.abs(value);
+   const formatScaled = (scaled: number, suffix: string) => `${scaled.toFixed(2)}${suffix}`;
++  const language = (i18n.resolvedLanguage || i18n.language || '').toLowerCase();
++
++  if (language.startsWith('zh')) {
++    const locale = language.includes('tw') || language.includes('hant') ? 'zh-TW' : 'zh-CN';
++    const tenThousandSuffix = locale === 'zh-TW' ? '萬' : '万';
++    const hundredMillionSuffix = locale === 'zh-TW' ? '億' : '亿';
++    const formatChineseScaled = (scaled: number, suffix: string) => `${new Intl.NumberFormat(locale, {
++      useGrouping: false,
++      maximumFractionDigits: 2,
++    }).format(scaled)}${suffix}`;
++    if (abs < 10_000) {
++      return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(value);
++    }
++    if (abs < 100_000_000) {
++      return formatChineseScaled(value / 10_000, tenThousandSuffix);
++    }
++    return formatChineseScaled(value / 100_000_000, hundredMillionSuffix);
++  }
+
+   if (abs < 1_000) {
+     return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+@@ -96,7 +115,9 @@ export function formatCompactNumber(value: number): string {
+
+ export function formatCompactTokenValue(value: number, withUnit = false): string {
+   const formatted = formatCompactNumber(value);
+-  return withUnit ? `${formatted} tokens` : formatted;
++  if (!withUnit) return formatted;
++  const language = (i18n.resolvedLanguage || i18n.language || '').toLowerCase();
++  return language.startsWith('zh') ? `${formatted} 个 Token` : `${formatted} tokens`;
+ }
+
+ export function formatFixedTwoDecimals(value: number): string {
