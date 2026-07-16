@@ -7,7 +7,7 @@
 ## 一键部署
 
 ```bash
-curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install.sh -o /tmp/install.sh && sudo bash /tmp/install.sh
 ```
 
 安装过程中，终端会显示 Codex 设备授权网址和代码。可以在另一台带浏览器的电脑上完成授权。
@@ -51,15 +51,15 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 ## 可选参数
 
 ```bash
-curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install.sh | \
-  sudo env PUBLIC_HOST=relay.example.com PUBLIC_PORT=8317 TZ=Asia/Shanghai bash
+curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install.sh -o /tmp/install.sh && \
+  sudo env PUBLIC_HOST=relay.example.com PUBLIC_PORT=8317 TZ=Asia/Shanghai bash /tmp/install.sh
 ```
 
 查看全部选项：
 
 ```bash
-curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install.sh | \
-  sudo bash -s -- --help
+curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install.sh -o /tmp/install.sh && \
+  sudo bash /tmp/install.sh --help
 ```
 
 安装中途失败时可直接重跑同一条命令。修复已完成且由本安装器管理的部署时，设置 `REPAIR=1`；原公网地址、端口和时区会从安装状态中恢复。
