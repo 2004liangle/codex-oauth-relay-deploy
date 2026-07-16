@@ -15,8 +15,8 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Validate Bash syntax
-        run: bash -n install-codex-relay.sh
+        run: bash -n install.sh install-codex-relay.sh
       - name: Run ShellCheck
-        run: shellcheck -x install-codex-relay.sh
+        run: shellcheck -x install.sh install-codex-relay.sh
       - name: Verify checksum
         run: sha256sum -c SHA256SUMS

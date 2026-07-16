@@ -7,10 +7,12 @@
 ## 一键部署
 
 ```bash
-curl -fL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/download/v1.0.0/install-codex-relay.sh -o /tmp/install-codex-relay.sh && echo 'a1afb9e61311e2cdf5557ea55a86952ca9059a3299b6b840e39a7a127318e43b  /tmp/install-codex-relay.sh' | sha256sum -c - && sudo bash /tmp/install-codex-relay.sh
+curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install.sh | sudo bash
 ```
 
 安装过程中，终端会显示 Codex 设备授权网址和代码。可以在另一台带浏览器的电脑上完成授权。
+
+这条命令只做三件事：下载引导脚本、自动校验完整安装器、开始安装。SHA-256 校验仍然存在，但不需要手工复制长字符串。
 
 ## 环境要求
 
@@ -40,7 +42,7 @@ curl -fL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/downlo
 
 ## 安全边界
 
-- GitHub 安装脚本通过 HTTPS 下载，并使用 README 中固定的 SHA-256 再校验。
+- GitHub 引导脚本通过 HTTPS 下载，并在内部使用固定 SHA-256 校验完整安装器。
 - 部署后的 Nginx 入口默认使用 HTTP。开放端口前，应把云安全组来源限制为自己的客户端 IP；来源不固定时先配置 HTTPS。
 - CLIProxyAPI、Squid 和 Usage Keeper 的内部端口不得直接开放到公网。
 - 公网管理入口阻止写方法、OAuth 凭据下载、队列消费以及 OAuth 发起/回调端点，但授权后的查看响应仍可能包含 Relay Key、配置和完整请求正文。
@@ -49,14 +51,15 @@ curl -fL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/downlo
 ## 可选参数
 
 ```bash
-sudo PUBLIC_HOST=relay.example.com PUBLIC_PORT=8317 TZ=Asia/Shanghai \
-  bash /tmp/install-codex-relay.sh
+curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install.sh | \
+  sudo env PUBLIC_HOST=relay.example.com PUBLIC_PORT=8317 TZ=Asia/Shanghai bash
 ```
 
 查看全部选项：
 
 ```bash
-bash /tmp/install-codex-relay.sh --help
+curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install.sh | \
+  sudo bash -s -- --help
 ```
 
 安装中途失败时可直接重跑同一条命令。修复已完成且由本安装器管理的部署时，设置 `REPAIR=1`；原公网地址、端口和时区会从安装状态中恢复。
