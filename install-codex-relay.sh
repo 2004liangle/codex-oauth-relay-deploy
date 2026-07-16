@@ -743,6 +743,29 @@ server {
         proxy_send_timeout 3600s;
     }
 
+    location = /v1/images/generations {
+        if (\$request_method != POST) { return 405; }
+        if (\$http_authorization = "") { return 401; }
+        client_max_body_size 1m;
+        client_body_timeout 30s;
+        proxy_pass http://127.0.0.1:18317;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Authorization \$http_authorization;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 3600s;
+        proxy_request_buffering on;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_next_upstream off;
+        proxy_ignore_client_abort off;
+        gzip off;
+    }
+
     location = /v1/responses {
         if (\$request_method != POST) { return 405; }
         if (\$http_authorization = "") { return 401; }
@@ -815,6 +838,15 @@ wait_for_http 404 "$LOCAL_URL/v0/management/usage-queue" \
 wait_for_http 404 "$LOCAL_URL/v0/management/codex-auth-url" \
   -H "Authorization: Bearer $MANAGEMENT_KEY" || \
   die "A side-effecting OAuth endpoint is publicly reachable."
+wait_for_http 401 "$LOCAL_URL/v1/images/generations" \
+  -X POST -H 'Content-Type: application/json' -d '{}' || \
+  die "Image generation authentication is not enforced."
+wait_for_http 400 "$LOCAL_URL/v1/images/generations" \
+  -X POST -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' -d '{}' || \
+  die "The image generation route did not reach CLIProxyAPI."
+wait_for_http 404 "$LOCAL_URL/v1/images/edits" -X POST || \
+  die "The image editing endpoint is unexpectedly public."
 
 INFERENCE_STATUS="not run"
 if [[ "$AUTH_READY" == "1" ]]; then
@@ -889,6 +921,7 @@ The current endpoint uses plain HTTP. Configure HTTPS before using it over untru
 
 API base URL:       $PUBLIC_URL/v1
 API key:            $API_KEY
+Image generation:   $PUBLIC_URL/v1/images/generations
 Usage dashboard:    $PUBLIC_URL/usage/
 Dashboard password: $DASHBOARD_PASSWORD
 Management panel:   $PUBLIC_URL/management.html (viewing requires the management key)
