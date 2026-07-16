@@ -83,12 +83,12 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 # 低质量草稿
 ~/.codex/skills/relay-images/scripts/relay_images.py generate \
   --prompt 'A clean product photo of a white ceramic cup' \
-  --quality low --size 1024x1024 --out draft.png
+  --quality low --size 1024x1024 --output draft.png
 
 # 高质量图生图
 ~/.codex/skills/relay-images/scripts/relay_images.py edit \
   --image source.png --prompt 'Keep the subject and replace the background with snow mountains' \
-  --quality high --size 2048x2048 --out final.png
+  --quality high --size 2048x2048 --output final.png
 ```
 
 `quality` 支持 `low`、`medium`、`high` 和 `auto`；输出支持 PNG、JPEG、WebP 和压缩控制。脚本不会打印 Key 或图片 Base64，但服务器 Request Log 仍可能保存提示词、输入图和输出图。
