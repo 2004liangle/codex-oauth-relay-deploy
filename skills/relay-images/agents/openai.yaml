@@ -1,0 +1,4 @@
+interface:
+  display_name: "Relay Images"
+  short_description: "Generate and edit images through an OpenAI-compatible relay"
+  default_prompt: "Use $relay-images to create or edit an image through my configured relay and save the result locally."

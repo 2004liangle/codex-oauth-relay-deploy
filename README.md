@@ -40,9 +40,9 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 
 客户端项目文件仍由客户端本地的 Codex 或兼容工具读写；服务器只处理模型请求。启用 Request Log 后，进入模型上下文的代码、提示词、工具参数和响应可能被记录在服务器上。
 
-公网 API 精确放行模型列表、Chat Completions、Completions、Responses 和图片生成。图片编辑与文件上传默认不开放。
+公网 API 精确放行模型列表、Chat Completions、Completions、Responses、图片生成和图片编辑。通用文件上传仍不开放。
 
-## 图片生成
+## 图片生成与编辑
 
 使用原来的 Base URL 和 Relay API Key 调用标准 OpenAI Images API。GPT Image 返回 Base64，下面的命令会在客户端解码成图片文件：
 
@@ -60,11 +60,49 @@ curl -sS "$API_BASE_URL/images/generations" \
 
 图片 Base64 会经过中转并写入 Request Log。当前入口默认是 HTTP；经过不可信网络时必须先配置 HTTPS。
 
+图片编辑使用标准 `POST /v1/images/edits` multipart 接口，支持最多 16 张本地参考图和可选 PNG alpha 遮罩。每张输入图必须小于 50 MB，整个请求不得超过 64 MiB；`/v1/files` 仍返回 `404`。64 MiB 是针对小内存个人服务器的安全上限，多张图片和遮罩需要共同计入。
+
+## Relay Images Skill
+
+在需要调用中转的 Codex 客户端上一键安装：
+
+```bash
+curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install-relay-images-skill.sh -o /tmp/install-relay-images-skill.sh && bash /tmp/install-relay-images-skill.sh
+```
+
+首次配置会交互式读取 Relay Key，并以 `0600` 权限保存在客户端：
+
+```bash
+~/.codex/skills/relay-images/scripts/relay_images.py configure \
+  --base-url "$API_BASE_URL" --allow-http
+```
+
+重启 Codex 或新开会话后，可以直接要求 `$relay-images` 文生图、图生图、多图合成或遮罩编辑。也可以直接运行脚本：
+
+```bash
+# 低质量草稿
+~/.codex/skills/relay-images/scripts/relay_images.py generate \
+  --prompt 'A clean product photo of a white ceramic cup' \
+  --quality low --size 1024x1024 --out draft.png
+
+# 高质量图生图
+~/.codex/skills/relay-images/scripts/relay_images.py edit \
+  --image source.png --prompt 'Keep the subject and replace the background with snow mountains' \
+  --quality high --size 2048x2048 --out final.png
+```
+
+`quality` 支持 `low`、`medium`、`high` 和 `auto`；输出支持 PNG、JPEG、WebP 和压缩控制。脚本不会打印 Key 或图片 Base64，但服务器 Request Log 仍可能保存提示词、输入图和输出图。
+
+需要严格尺寸或格式时加 `--strict-output`。中转若返回了不同尺寸/格式，脚本仍会安全保存已生成文件，但将 `output_contract_met` 标记为 `false` 并以非零状态退出，避免自动化误判成功。
+
 ## 安全边界
 
 - GitHub 引导脚本通过 HTTPS 下载，并在内部使用固定 SHA-256 校验完整安装器。
 - 部署后的 Nginx 入口默认使用 HTTP。开放端口前，应把云安全组来源限制为自己的客户端 IP；来源不固定时先配置 HTTPS。
 - CLIProxyAPI、Squid 和 Usage Keeper 的内部端口不得直接开放到公网。
+- 所有公网推理路由都在 Nginx 读取正文前核对完整 Relay Key；仅有非空但错误的 Authorization 不会进入 CLIProxyAPI 请求日志。
+- `/v1/images/edits` 只允许 `POST`，单请求上限为 64 MiB，并限制全局同时处理一个编辑上传；通用 `/v1/files`、尾斜杠和子路径保持关闭。
+- CLIProxyAPI 使用 systemd 内存与交换空间上限。达到上限时单次请求可能失败，但不会无限挤占整台服务器。
 - 公网管理入口阻止写方法、OAuth 凭据下载、队列消费以及 OAuth 发起/回调端点，但授权后的查看响应仍可能包含 Relay Key、配置和完整请求正文。
 - 不要公开 `/root/codex-relay-credentials.txt` 或 `/var/lib/cliproxyapi/auth/*.json`。
 

@@ -15,9 +15,14 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Validate Bash syntax
-        run: bash -n install.sh install-codex-relay.sh
+        run: bash -n install.sh install-codex-relay.sh install-relay-images-skill.sh
       - name: Run ShellCheck
-        run: shellcheck -x install.sh install-codex-relay.sh
+        run: shellcheck -x install.sh install-codex-relay.sh install-relay-images-skill.sh
+      - name: Validate Relay Images Skill
+        run: |
+          python3 -m py_compile skills/relay-images/scripts/relay_images.py
+          python3 -m unittest -v tests/test_relay_images.py
+          bash install-relay-images-skill.sh --verify-local skills/relay-images
       - name: Verify checksum
         run: sha256sum -c SHA256SUMS
       - name: Verify bootstrap installer pin
