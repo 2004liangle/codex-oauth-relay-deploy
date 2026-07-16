@@ -276,6 +276,9 @@ else
   DASHBOARD_PASSWORD="usage-$(openssl rand -hex 16)"
 fi
 
+[[ "$API_KEY" =~ ^[A-Za-z0-9._~-]{32,200}$ ]] || \
+  die "The saved API key contains characters that cannot be represented safely in Nginx."
+
 FULL_PORT_CHECK=0
 PUBLIC_PORT_CHANGED=0
 if [[ "$REPAIR_MODE" == "0" ]]; then
@@ -489,6 +492,11 @@ ExecStart=/opt/cliproxyapi/cli-proxy-api -config /etc/cliproxyapi/config.yaml -l
 Restart=on-failure
 RestartSec=5s
 UMask=0077
+MemoryAccounting=true
+MemoryHigh=50%
+MemoryMax=70%
+MemorySwapMax=1G
+TasksMax=128
 
 NoNewPrivileges=true
 PrivateTmp=true
@@ -657,6 +665,16 @@ systemctl restart cpa-usage-keeper
 
 log "Configuring the public Nginx entry point"
 cat >/etc/nginx/sites-available/codex-relay <<EOF
+map_hash_bucket_size 256;
+
+map \$http_authorization \$codex_relay_api_authorized {
+    default 0;
+    "Bearer $API_KEY" 1;
+}
+
+limit_conn_zone \$server_name zone=codex_relay_image_edits_global:1m;
+limit_req_zone \$binary_remote_addr zone=codex_relay_image_edits_per_ip:10m rate=6r/m;
+
 server {
     listen $PUBLIC_PORT default_server;
     listen [::]:$PUBLIC_PORT default_server;
@@ -715,13 +733,13 @@ server {
 
     location = /v1/models {
         if (\$request_method != GET) { return 405; }
-        if (\$http_authorization = "") { return 401; }
+        if (\$codex_relay_api_authorized = 0) { return 401; }
         proxy_pass http://127.0.0.1:18317;
     }
 
     location = /v1/chat/completions {
         if (\$request_method != POST) { return 405; }
-        if (\$http_authorization = "") { return 401; }
+        if (\$codex_relay_api_authorized = 0) { return 401; }
         proxy_pass http://127.0.0.1:18317;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
@@ -733,7 +751,7 @@ server {
 
     location = /v1/completions {
         if (\$request_method != POST) { return 405; }
-        if (\$http_authorization = "") { return 401; }
+        if (\$codex_relay_api_authorized = 0) { return 401; }
         proxy_pass http://127.0.0.1:18317;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
@@ -745,7 +763,7 @@ server {
 
     location = /v1/images/generations {
         if (\$request_method != POST) { return 405; }
-        if (\$http_authorization = "") { return 401; }
+        if (\$codex_relay_api_authorized = 0) { return 401; }
         client_max_body_size 1m;
         client_body_timeout 30s;
         proxy_pass http://127.0.0.1:18317;
@@ -766,9 +784,36 @@ server {
         gzip off;
     }
 
+    location = /v1/images/edits {
+        if (\$request_method != POST) { return 405; }
+        if (\$codex_relay_api_authorized = 0) { return 401; }
+        client_max_body_size 64m;
+        client_body_timeout 300s;
+        limit_conn codex_relay_image_edits_global 1;
+        limit_conn_status 429;
+        limit_req zone=codex_relay_image_edits_per_ip burst=2 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:18317;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Authorization \$http_authorization;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 600s;
+        proxy_read_timeout 3600s;
+        proxy_request_buffering on;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_next_upstream off;
+        proxy_ignore_client_abort off;
+        gzip off;
+    }
+
     location = /v1/responses {
         if (\$request_method != POST) { return 405; }
-        if (\$http_authorization = "") { return 401; }
+        if (\$codex_relay_api_authorized = 0) { return 401; }
         proxy_pass http://127.0.0.1:18317;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
@@ -780,7 +825,7 @@ server {
 
     location = /v1/responses/compact {
         if (\$request_method != POST) { return 405; }
-        if (\$http_authorization = "") { return 401; }
+        if (\$codex_relay_api_authorized = 0) { return 401; }
         proxy_pass http://127.0.0.1:18317;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
@@ -797,6 +842,7 @@ server {
 }
 EOF
 
+chmod 0600 /etc/nginx/sites-available/codex-relay
 ln -sfn /etc/nginx/sites-available/codex-relay /etc/nginx/sites-enabled/codex-relay
 install -o www-data -g adm -m 0640 /dev/null /var/log/nginx/codex-relay-error.log
 nginx -t
@@ -841,12 +887,29 @@ wait_for_http 404 "$LOCAL_URL/v0/management/codex-auth-url" \
 wait_for_http 401 "$LOCAL_URL/v1/images/generations" \
   -X POST -H 'Content-Type: application/json' -d '{}' || \
   die "Image generation authentication is not enforced."
+wait_for_http 401 "$LOCAL_URL/v1/images/generations" \
+  -X POST -H 'Authorization: Bearer wrong-nonempty-key' \
+  -H 'Content-Type: application/json' -d '{}' || \
+  die "Image generation accepts a forged non-empty Authorization header."
 wait_for_http 400 "$LOCAL_URL/v1/images/generations" \
   -X POST -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' -d '{}' || \
   die "The image generation route did not reach CLIProxyAPI."
-wait_for_http 404 "$LOCAL_URL/v1/images/edits" -X POST || \
-  die "The image editing endpoint is unexpectedly public."
+wait_for_http 401 "$LOCAL_URL/v1/images/edits" \
+  -X POST -F 'model=gpt-image-2' -F 'prompt=route check' || \
+  die "Image editing authentication is not enforced."
+wait_for_http 401 "$LOCAL_URL/v1/images/edits" \
+  -X POST -H 'Authorization: Bearer wrong-nonempty-key' \
+  -F 'model=gpt-image-2' -F 'prompt=route check' || \
+  die "Image editing accepts a forged non-empty Authorization header."
+wait_for_http 400 "$LOCAL_URL/v1/images/edits" \
+  -X POST -H "Authorization: Bearer $API_KEY" \
+  -F 'model=gpt-image-2' -F 'prompt=route check' || \
+  die "The image editing route did not reach CLIProxyAPI."
+wait_for_http 404 "$LOCAL_URL/v1/images/edits/" -X POST || \
+  die "The image editing trailing-slash route is unexpectedly public."
+wait_for_http 404 "$LOCAL_URL/v1/files" -X POST || \
+  die "The general file upload endpoint is unexpectedly public."
 
 INFERENCE_STATUS="not run"
 if [[ "$AUTH_READY" == "1" ]]; then
@@ -922,6 +985,7 @@ The current endpoint uses plain HTTP. Configure HTTPS before using it over untru
 API base URL:       $PUBLIC_URL/v1
 API key:            $API_KEY
 Image generation:   $PUBLIC_URL/v1/images/generations
+Image editing:      $PUBLIC_URL/v1/images/edits
 Usage dashboard:    $PUBLIC_URL/usage/
 Dashboard password: $DASHBOARD_PASSWORD
 Management panel:   $PUBLIC_URL/management.html (viewing requires the management key)
