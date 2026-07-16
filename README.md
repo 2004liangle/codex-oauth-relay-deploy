@@ -40,6 +40,26 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 
 客户端项目文件仍由客户端本地的 Codex 或兼容工具读写；服务器只处理模型请求。启用 Request Log 后，进入模型上下文的代码、提示词、工具参数和响应可能被记录在服务器上。
 
+公网 API 精确放行模型列表、Chat Completions、Completions、Responses 和图片生成。图片编辑与文件上传默认不开放。
+
+## 图片生成
+
+使用原来的 Base URL 和 Relay API Key 调用标准 OpenAI Images API。GPT Image 返回 Base64，下面的命令会在客户端解码成图片文件：
+
+```bash
+curl -sS "$API_BASE_URL/images/generations" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "model": "gpt-image-2",
+    "prompt": "A clean product photo of a white ceramic cup",
+    "quality": "low",
+    "output_format": "png"
+  }' | jq -r '.data[0].b64_json' | base64 --decode > generated.png
+```
+
+图片 Base64 会经过中转并写入 Request Log。当前入口默认是 HTTP；经过不可信网络时必须先配置 HTTPS。
+
 ## 安全边界
 
 - GitHub 引导脚本通过 HTTPS 下载，并在内部使用固定 SHA-256 校验完整安装器。
