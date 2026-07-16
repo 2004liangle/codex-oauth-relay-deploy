@@ -12,16 +12,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Validate Bash syntax
-        run: bash -n install.sh install-codex-relay.sh install-relay-images-skill.sh
+        run: bash -n install.sh install-codex-relay.sh install-relay-images-skill.sh usage-ui/build-plain-zh.sh
       - name: Run ShellCheck
-        run: shellcheck -x install.sh install-codex-relay.sh install-relay-images-skill.sh
+        run: shellcheck -x install.sh install-codex-relay.sh install-relay-images-skill.sh usage-ui/build-plain-zh.sh
+      - name: Build and validate plain-Chinese usage dashboard
+        run: bash usage-ui/build-plain-zh.sh /tmp/usage-ui-dist
       - name: Validate Relay Images Skill
         run: |
           python3 -m py_compile skills/relay-images/scripts/relay_images.py
-          python3 -m unittest -v tests/test_relay_images.py
+          python3 -m unittest -v tests/test_relay_images.py tests/test_installer_contracts.py
           bash install-relay-images-skill.sh --verify-local skills/relay-images
       - name: Verify checksum
         run: sha256sum -c SHA256SUMS
@@ -29,5 +34,11 @@ jobs:
         run: |
           actual_sha="$(sha256sum install-codex-relay.sh | cut -d' ' -f1)"
           pinned_sha="$(awk -F'"' '$1 == "INSTALLER_SHA256=" { print $2 }' install.sh)"
+          test -n "$pinned_sha"
+          test "$pinned_sha" = "$actual_sha"
+      - name: Verify usage dashboard package pin
+        run: |
+          actual_sha="$(sha256sum /tmp/usage-ui-dist/cpa-usage-ui_1.13.2-plain-zh.1.tar.gz | cut -d' ' -f1)"
+          pinned_sha="$(awk -F'"' '$1 == "USAGE_UI_SHA256=" { print $2 }' install-codex-relay.sh)"
           test -n "$pinned_sha"
           test "$pinned_sha" = "$actual_sha"

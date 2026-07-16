@@ -42,6 +42,12 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 
 公网 API 精确放行模型列表、Chat Completions、Completions、Responses、图片生成和图片编辑。通用文件上传仍不开放。
 
+## 用量后台
+
+新浏览器第一次打开用量后台时默认显示简体中文，页面把常见性能缩写换成了直接说明，例如“开始回复等待时间”“整次请求耗时”“每分钟请求数”和“每分钟总用量”。`Token`、`API Key` 等接口中的固定名称会保留，避免配置时对不上字段。
+
+右上角仍可切换英文或繁体中文，手动选择后会记住该语言。这个定制只替换浏览器中的静态页面；用量数据库、登录密码和后台 API 仍由 CPA Usage Keeper 管理。
+
 ## 图片生成与编辑
 
 使用原来的 Base URL 和 Relay API Key 调用标准 OpenAI Images API。GPT Image 返回 Base64，下面的命令会在客户端解码成图片文件：
@@ -126,6 +132,7 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 
 - CLIProxyAPI `7.2.80`
 - CPA Usage Keeper `1.13.2`
+- 白话中文用量页面 `1.13.2-plain-zh.1`
 - CLIProxy API Management Center `1.18.3`
 
 脚本会校验每个下载产物的 SHA-256，不匹配时立即停止。
