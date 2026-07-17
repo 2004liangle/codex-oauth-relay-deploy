@@ -22,7 +22,7 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 - systemd 作为 PID 1
 - root 或 sudo 权限
 - 出站 TCP 443 可访问 GitHub、OpenAI 和 ChatGPT 相关域名
-- 公网端口默认 `8317`；内部端口 `18080`、`18081`、`18317` 不得占用
+- 公网端口默认 `8317`；内部端口 `18080`、`18081`、`18317`、`18318` 不得占用
 
 ## 安装结果
 
@@ -68,38 +68,37 @@ curl -sS "$API_BASE_URL/images/generations" \
 
 图片编辑使用标准 `POST /v1/images/edits` multipart 接口，支持最多 16 张本地参考图和可选 PNG alpha 遮罩。每张输入图必须小于 50 MB，整个请求不得超过 64 MiB；`/v1/files` 仍返回 `404`。64 MiB 是针对小内存个人服务器的安全上限，多张图片和遮罩需要共同计入。
 
-## Relay Images Skill
+## 通用 Relay Artifacts Skill
 
-在需要调用中转的 Codex 客户端上一键安装：
+客户端不需要运行系统安装命令。下载 [`relay-artifacts.zip`](https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/relay-artifacts.zip)，再用客户端的“上传技能”或“导入 Skill”功能选择这个 ZIP 即可。
 
-```bash
-curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install-relay-images-skill.sh -o /tmp/install-relay-images-skill.sh && bash /tmp/install-relay-images-skill.sh
+这个客户端包依赖服务器已经启用飞书附件 Sidecar；服务端安装和目录配置见 [`artifact-relay/README.md`](artifact-relay/README.md)。
+
+ZIP 是标准 Agent Skills 文件包，顶层只有一个同名目录：
+
+```text
+relay-artifacts/
+├── SKILL.md
+├── scripts/
+├── references/
+└── assets/
 ```
 
-首次配置会交互式读取 Relay Key，并以 `0600` 权限保存在客户端：
+不同客户端的入口名称会略有差异：
 
-```bash
-~/.codex/skills/relay-images/scripts/relay_images.py configure \
-  --base-url "$API_BASE_URL" --allow-http
-```
+- WorkBuddy：进入“专家·技能·连接器”，点击“上传技能”，选择 ZIP。
+- Kimi：在技能面板添加自定义 Skill；Kimi Code 可先解压 ZIP，再把里面的 `relay-artifacts/` 目录放入其 Skills 目录。
+- 豆包：只有客户端明确支持标准 Agent Skills、执行随包 Python 脚本和读写本地项目文件时才能使用；仅能导入提示词但不能执行脚本的版本无法完成附件传输。这里不承诺所有豆包版本兼容。
 
-重启 Codex 或新开会话后，可以直接要求 `$relay-images` 文生图、图生图、多图合成或遮罩编辑。也可以直接运行脚本：
+上传 ZIP 后，直接用自然语言要求客户端执行任务，例如“生成一张低质量草稿并保存到项目目录”“用当前目录的两张参考图合成一张高质量图片”“把这个附件通过飞书交给服务端处理并下载结果”。不需要手工输入脚本命令。
 
-```bash
-# 低质量草稿
-~/.codex/skills/relay-images/scripts/relay_images.py generate \
-  --prompt 'A clean product photo of a white ceramic cup' \
-  --quality low --size 1024x1024 --output draft.png
+公开 ZIP 不包含个人 IP、Relay Key、飞书凭据或私有配置。首次使用仍需按 Skill 提示在客户端本地提供 Relay 地址和 Key；附件模式还要求客户端能使用与服务端相同的飞书身份。飞书里的输入附件和处理结果不会自动删除，只有用户明确要求时才删除。
 
-# 高质量图生图
-~/.codex/skills/relay-images/scripts/relay_images.py edit \
-  --image source.png --prompt 'Keep the subject and replace the background with snow mountains' \
-  --quality high --size 2048x2048 --output final.png
-```
+客户端必须支持标准 Agent Skills、访问 Relay 和飞书、读写当前项目文件，并且能执行包内 Python 3 脚本，或具备等价的原生 HTTP 与飞书文件工具。云端客户端即使能导入 ZIP，如果不能访问本地项目目录，也不能代替本地客户端修改文件。
 
-`quality` 支持 `low`、`medium`、`high` 和 `auto`；输出支持 PNG、JPEG、WebP 和压缩控制。脚本不会打印 Key 或图片 Base64，但服务器 Request Log 仍可能保存提示词、输入图和输出图。
+### Codex CLI 专用版
 
-需要严格尺寸或格式时加 `--strict-output`。中转若返回了不同尺寸/格式，脚本仍会安全保存已生成文件，但将 `output_contract_met` 标记为 `false` 并以非零状态退出，避免自动化误判成功。
+原来的 `relay-images` Skill 仍保留给 Codex CLI 或需要直接运行脚本的高级用法，但它不是 WorkBuddy、Kimi、豆包等客户端的首选安装方式。Codex CLI 用户可继续使用 [`install-relay-images-skill.sh`](https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/install-relay-images-skill.sh)。
 
 ## 安全边界
 

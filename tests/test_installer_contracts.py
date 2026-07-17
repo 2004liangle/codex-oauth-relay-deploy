@@ -13,9 +13,9 @@ UI_BUILDER = (ROOT / "usage-ui" / "build-plain-zh.sh").read_text()
 
 class UsageDashboardInstallerTests(unittest.TestCase):
     def test_release_entry_points_are_aligned(self):
-        self.assertIn('DEPLOY_RELEASE_VERSION="1.2.0"', INSTALLER)
-        self.assertIn('/releases/download/v1.2.0/install-codex-relay.sh', BOOTSTRAP)
-        self.assertIn('VERSION="v1.2.0"', IMAGES_INSTALLER)
+        self.assertIn('DEPLOY_RELEASE_VERSION="1.3.0"', INSTALLER)
+        self.assertIn('/releases/download/v1.3.0/install-codex-relay.sh', BOOTSTRAP)
+        self.assertIn('VERSION="v1.3.0"', IMAGES_INSTALLER)
 
     def test_plain_chinese_ui_is_versioned_and_hash_pinned(self):
         version = re.search(r'^USAGE_UI_VERSION="([^"]+)"$', INSTALLER, re.MULTILINE)

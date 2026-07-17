@@ -12,15 +12,20 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import mimetypes
 import os
 import re
 import secrets
+import shutil
 import ssl
 import stat
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, Sequence
@@ -32,6 +37,7 @@ EXIT_ROUTE = 4
 EXIT_QUOTA = 5
 EXIT_NETWORK = 6
 EXIT_RESPONSE = 7
+EXIT_LARK = 8
 EXIT_FILESYSTEM = 9
 
 MAX_PROMPT_CHARS = 32_000
@@ -53,6 +59,18 @@ USAGE_FIELDS = {
     "input_tokens_details",
     "output_tokens_details",
 }
+ARTIFACT_STATUSES = {
+    "queued",
+    "downloading",
+    "processing",
+    "uploading",
+    "ready_for_processing",
+    "completed",
+    "failed",
+}
+TERMINAL_ARTIFACT_STATUSES = {"ready_for_processing", "completed", "failed"}
+SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
+REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}")
 
 
 class RelayError(Exception):
@@ -61,12 +79,27 @@ class RelayError(Exception):
         self.exit_code = exit_code
 
 
+class LarkCliError(RelayError):
+    def __init__(self, message: str, retryable: bool = False):
+        super().__init__(message, EXIT_LARK)
+        self.retryable = retryable
+
+
 @dataclass(frozen=True)
 class RelayConfig:
     base_url: str
     api_key: str
     allow_http: bool
     parsed_url: urllib.parse.SplitResult
+
+
+@dataclass(frozen=True)
+class LarkConfig:
+    executable: str
+    identity: str
+    profile: str | None
+    target_type: str | None
+    target_token: str | None
 
 
 @dataclass(frozen=True)
@@ -318,6 +351,152 @@ def parse_json_response(result: HttpResult, endpoint: str) -> dict[str, object]:
     return value
 
 
+def retry_delay(result: HttpResult | None, attempt: int) -> float:
+    if result is not None:
+        value = result.headers.get("retry-after")
+        if value and re.fullmatch(r"[0-9]{1,4}", value):
+            return min(float(value), 30.0)
+    return min(0.5 * (2**attempt), 8.0)
+
+
+def artifact_json_request(
+    config: RelayConfig,
+    method: str,
+    suffix: str,
+    payload: Mapping[str, object] | None,
+    timeout: float,
+    retries: int,
+) -> dict[str, object]:
+    body = (
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if payload is not None
+        else None
+    )
+    endpoint = f"/v1/{suffix.lstrip('/')}"
+    for attempt in range(retries + 1):
+        result: HttpResult | None = None
+        try:
+            result = request(
+                config,
+                method,
+                suffix,
+                body,
+                "application/json" if body is not None else None,
+                timeout,
+            )
+        except RelayError as exc:
+            if exc.exit_code != EXIT_NETWORK or attempt >= retries:
+                raise
+            time.sleep(retry_delay(None, attempt))
+            continue
+        if result.status in {429} or result.status >= 500:
+            if attempt < retries:
+                time.sleep(retry_delay(result, attempt))
+                continue
+        return parse_json_response(result, endpoint)
+    raise RelayError("artifact request retry loop ended unexpectedly", EXIT_NETWORK)
+
+
+def artifact_capabilities(
+    config: RelayConfig,
+    timeout: float,
+    retries: int,
+) -> dict[str, object]:
+    value = artifact_json_request(
+        config,
+        "GET",
+        "artifact-capabilities",
+        None,
+        timeout,
+        retries,
+    )
+    if value.get("delivery") != "lark_drive":
+        raise RelayError("relay does not advertise Lark Drive artifact delivery", EXIT_ROUTE)
+    return value
+
+
+def validate_request_id(value: str | None) -> str:
+    request_id = value or f"img-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(8)}"
+    if not REQUEST_ID_RE.fullmatch(request_id):
+        raise RelayError("request ID must use 8-128 letters, digits, dots, underscores, or hyphens")
+    return request_id
+
+
+def parse_artifact_job(value: object, expected_id: str | None = None) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise RelayError("artifact job response must be a JSON object", EXIT_RESPONSE)
+    request_id = value.get("request_id")
+    status = value.get("status")
+    if not isinstance(request_id, str) or not REQUEST_ID_RE.fullmatch(request_id):
+        raise RelayError("artifact job response has an invalid request_id", EXIT_RESPONSE)
+    if expected_id is not None and request_id != expected_id:
+        raise RelayError("artifact job response request_id does not match", EXIT_RESPONSE)
+    if status not in ARTIFACT_STATUSES:
+        raise RelayError("artifact job response has an invalid status", EXIT_RESPONSE)
+    return value
+
+
+def fetch_artifact_job(
+    config: RelayConfig,
+    request_id: str,
+    timeout: float,
+    retries: int,
+) -> dict[str, object]:
+    value = artifact_json_request(
+        config,
+        "GET",
+        f"artifact-jobs/{urllib.parse.quote(request_id, safe='')}",
+        None,
+        timeout,
+        retries,
+    )
+    return parse_artifact_job(value, request_id)
+
+
+def wait_for_artifact_job(
+    config: RelayConfig,
+    initial: Mapping[str, object],
+    timeout: float,
+    retries: int,
+    poll_interval: float,
+    wait_timeout: float,
+    terminal_statuses: set[str] | None = None,
+) -> dict[str, object]:
+    job = parse_artifact_job(dict(initial))
+    request_id = str(job["request_id"])
+    deadline = time.monotonic() + wait_timeout
+    previous: object = None
+    terminals = terminal_statuses or TERMINAL_ARTIFACT_STATUSES
+    while True:
+        status = job["status"]
+        if status != previous:
+            eprint(f"artifact job {request_id}: {status}")
+            previous = status
+        if status in terminals:
+            return job
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RelayError(
+                f"artifact job {request_id} is still running; use artifact-status to continue",
+                EXIT_NETWORK,
+            )
+        time.sleep(min(poll_interval, remaining))
+        job = fetch_artifact_job(config, request_id, timeout, retries)
+
+
+def artifact_failure(job: Mapping[str, object]) -> RelayError:
+    value = job.get("error")
+    code = "unknown"
+    retryable = False
+    if isinstance(value, dict):
+        raw_code = value.get("code")
+        if isinstance(raw_code, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", raw_code):
+            code = raw_code
+        retryable = value.get("retryable") is True
+    suffix = "; retry by submitting a new job with a new request_id" if retryable else ""
+    return RelayError(f"artifact job {job.get('request_id')} failed ({code}){suffix}", EXIT_RESPONSE)
+
+
 def sniff_image(data: bytes) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
@@ -438,6 +617,415 @@ def atomic_write(path: Path, data: bytes, overwrite: bool) -> None:
         except OSError:
             pass
         raise RelayError(f"cannot write output {path}: {exc}", EXIT_FILESYSTEM) from exc
+
+
+def safe_artifact_name(value: str) -> str:
+    name = value.strip()
+    name = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", name)
+    name = name.rstrip(" .")
+    if name in {"", ".", ".."}:
+        name = "artifact.bin"
+    windows_stem = name.split(".", 1)[0].upper()
+    if windows_stem in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(r"(?:COM|LPT)[1-9]", windows_stem):
+        name = f"_{name}"
+    if len(name) > 240:
+        suffix = Path(name).suffix[:20]
+        name = name[: 240 - len(suffix)] + suffix
+    return name
+
+
+def valid_lark_token(value: object) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{6,256}", value):
+        return None
+    return value
+
+
+def resolve_lark_executable(value: str) -> str:
+    candidate = Path(value).expanduser()
+    if candidate.parent != Path(".") or candidate.is_absolute():
+        resolved = candidate.resolve()
+        if not resolved.is_file():
+            raise LarkCliError("configured lark-cli executable does not exist")
+        return str(resolved)
+    located = shutil.which(value)
+    if not located:
+        raise LarkCliError("lark-cli is not installed or not on PATH")
+    return located
+
+
+def resolve_lark_config(
+    args: argparse.Namespace,
+    capabilities: Mapping[str, object] | None = None,
+    require_target: bool = False,
+) -> LarkConfig:
+    stored = read_config(config_path(getattr(args, "config", None)))
+    executable = (
+        getattr(args, "lark_cli", None)
+        or os.environ.get("CODEX_RELAY_LARK_CLI")
+        or stored.get("lark_cli")
+        or "lark-cli"
+    )
+    if not isinstance(executable, str) or not executable.strip():
+        raise LarkCliError("lark-cli executable setting is invalid")
+
+    capability_identity = capabilities.get("identity") if capabilities else None
+    identity = (
+        getattr(args, "lark_identity", None)
+        or os.environ.get("CODEX_RELAY_LARK_AS")
+        or stored.get("lark_identity")
+        or capability_identity
+        or "user"
+    )
+    if identity not in {"user", "bot"}:
+        raise LarkCliError("Lark identity must be user or bot")
+    profile = (
+        getattr(args, "lark_profile", None)
+        or os.environ.get("CODEX_RELAY_LARK_PROFILE")
+        or stored.get("lark_profile")
+    )
+    if profile is not None and (not isinstance(profile, str) or not profile.strip()):
+        raise LarkCliError("Lark profile setting is invalid")
+
+    explicit_folder = getattr(args, "folder_token", None)
+    explicit_wiki = getattr(args, "wiki_token", None)
+    environment_folder = os.environ.get("CODEX_RELAY_LARK_FOLDER_TOKEN")
+    environment_wiki = os.environ.get("CODEX_RELAY_LARK_WIKI_TOKEN")
+    if explicit_folder or explicit_wiki:
+        folder, wiki = explicit_folder, explicit_wiki
+    elif environment_folder or environment_wiki:
+        folder, wiki = environment_folder, environment_wiki
+    else:
+        folder, wiki = stored.get("lark_folder_token"), stored.get("lark_wiki_token")
+    if folder and wiki:
+        raise LarkCliError("configure either a Lark folder token or wiki token, not both")
+    target_type: str | None = "folder" if folder else "wiki" if wiki else None
+    target_token = valid_lark_token(folder or wiki)
+    if (folder or wiki) and target_token is None:
+        raise LarkCliError("configured Lark target token is invalid")
+
+    if target_token is None and capabilities:
+        target = capabilities.get("input_target")
+        if isinstance(target, dict) and target.get("type") in {"folder", "wiki"}:
+            discovered = valid_lark_token(target.get("token"))
+            if discovered:
+                target_type = str(target["type"])
+                target_token = discovered
+    if require_target and target_token is None:
+        raise LarkCliError(
+            "relay did not advertise an input folder; configure one with artifact-configure"
+        )
+    return LarkConfig(
+        resolve_lark_executable(executable),
+        str(identity),
+        str(profile) if profile else None,
+        target_type,
+        target_token,
+    )
+
+
+def parse_lark_json(stdout: str, stderr: str, returncode: int) -> dict[str, object]:
+    values: list[dict[str, object]] = []
+    sources = (stdout, stderr) if returncode == 0 else (stderr, stdout)
+    decoder = json.JSONDecoder()
+    for source in sources:
+        offset = 0
+        while True:
+            start = source.find("{", offset)
+            if start < 0:
+                break
+            try:
+                candidate, end = decoder.raw_decode(source, start)
+            except json.JSONDecodeError:
+                offset = start + 1
+                continue
+            offset = end
+            if isinstance(candidate, dict) and "ok" in candidate:
+                values.append(candidate)
+    expected_ok = returncode == 0
+    value = next((item for item in values if item.get("ok") is expected_ok), None)
+    if value is None and values:
+        value = values[0]
+    if returncode == 0 and isinstance(value, dict) and value.get("ok") is True:
+        return value
+    retryable = False
+    category = "command"
+    if isinstance(value, dict):
+        error = value.get("error")
+        if isinstance(error, dict):
+            error_type = error.get("type")
+            subtype = error.get("subtype")
+            if error_type in {"authorization", "authentication"}:
+                category = "authentication"
+            elif error_type in {"permission", "forbidden"}:
+                category = "permission"
+            elif error_type in {"network", "rate_limit", "server"}:
+                category = "network"
+                retryable = True
+            elif subtype in {"rate_limit", "temporarily_unavailable", "timeout"}:
+                category = "network"
+                retryable = True
+            elif error_type == "confirmation":
+                category = "confirmation"
+    raise LarkCliError(f"Lark CLI {category} failure", retryable=retryable)
+
+
+def run_lark_cli(
+    config: LarkConfig,
+    arguments: Sequence[str],
+    cwd: Path,
+    timeout: float,
+) -> dict[str, object]:
+    command = [config.executable]
+    if config.profile:
+        command.extend(["--profile", config.profile])
+    command.extend(arguments)
+    env = os.environ.copy()
+    env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
+    env["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise LarkCliError("Lark CLI timed out", retryable=True) from exc
+    except OSError as exc:
+        raise LarkCliError("cannot start lark-cli") from exc
+    return parse_lark_json(completed.stdout, completed.stderr, completed.returncode)
+
+
+def find_file_token(value: object) -> str | None:
+    if isinstance(value, dict):
+        direct = valid_lark_token(value.get("file_token"))
+        if direct:
+            return direct
+        for item in value.values():
+            token = find_file_token(item)
+            if token:
+                return token
+    elif isinstance(value, list):
+        for item in value:
+            token = find_file_token(item)
+            if token:
+                return token
+    return None
+
+
+@contextmanager
+def snapshot_artifact(path_value: str) -> Iterator[tuple[Path, str, int, str, str]]:
+    source = Path(path_value).expanduser()
+    try:
+        if source.is_symlink():
+            raise RelayError(f"artifact input must not be a symlink: {source}")
+        source_stat = source.stat()
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise RelayError(f"artifact input is not a regular file: {source}")
+    except RelayError:
+        raise
+    except OSError as exc:
+        raise RelayError(f"cannot inspect artifact input {source}: {exc}") from exc
+    name = safe_artifact_name(source.name)
+    mime_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    with tempfile.TemporaryDirectory(prefix="relay-artifact-") as directory:
+        staged = Path(directory) / name
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(source, flags)
+            with os.fdopen(descriptor, "rb") as incoming, staged.open("xb") as outgoing:
+                while True:
+                    chunk = incoming.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    outgoing.write(chunk)
+                    digest.update(chunk)
+                    size += len(chunk)
+                outgoing.flush()
+                os.fsync(outgoing.fileno())
+            os.chmod(staged, 0o600)
+        except OSError as exc:
+            raise RelayError(f"cannot snapshot artifact input {source}: {exc}", EXIT_FILESYSTEM) from exc
+        if size <= 0:
+            raise RelayError(f"artifact input is empty: {source}")
+        yield staged, name, size, digest.hexdigest(), mime_type
+
+
+def upload_artifact(
+    lark: LarkConfig,
+    path: str,
+    timeout: float,
+    retries: int,
+    role: str | None = None,
+    mime_type_override: str | None = None,
+) -> dict[str, object]:
+    if not lark.target_type or not lark.target_token:
+        raise LarkCliError("Lark upload target is not configured")
+    with snapshot_artifact(path) as (staged, name, size, sha256, mime_type):
+        arguments = [
+            "drive",
+            "+upload",
+            "--as",
+            lark.identity,
+            "--file",
+            staged.name,
+            "--name",
+            name,
+            "--format",
+            "json",
+            f"--{lark.target_type}-token",
+            lark.target_token,
+        ]
+        for attempt in range(retries + 1):
+            try:
+                response = run_lark_cli(lark, arguments, staged.parent, timeout)
+                break
+            except LarkCliError as exc:
+                if not exc.retryable or attempt >= retries:
+                    raise
+                time.sleep(retry_delay(None, attempt))
+        else:
+            raise LarkCliError("Lark upload retry loop ended unexpectedly")
+        file_token = find_file_token(response)
+        if not file_token:
+            raise LarkCliError("Lark upload response did not include a file token")
+        item: dict[str, object] = {
+            "file_token": file_token,
+            "name": name,
+            "mime_type": mime_type_override or mime_type,
+            "size_bytes": size,
+            "sha256": sha256,
+        }
+        if role:
+            item["role"] = role
+        return item
+
+
+def normalized_artifact_entry(value: object, allow_role: bool = False) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise RelayError("artifact manifest entry must be an object", EXIT_RESPONSE)
+    token = valid_lark_token(value.get("file_token"))
+    name = value.get("name")
+    mime_type = value.get("mime_type")
+    size = value.get("size_bytes")
+    digest = value.get("sha256")
+    if not token:
+        raise RelayError("artifact manifest entry has an invalid file_token", EXIT_RESPONSE)
+    if not isinstance(name, str) or not name.strip() or len(name) > 500:
+        raise RelayError("artifact manifest entry has an invalid name", EXIT_RESPONSE)
+    if not isinstance(mime_type, str) or not re.fullmatch(r"[-+.A-Za-z0-9]+/[-+.A-Za-z0-9]+", mime_type):
+        raise RelayError("artifact manifest entry has an invalid mime_type", EXIT_RESPONSE)
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise RelayError("artifact manifest entry has an invalid size_bytes", EXIT_RESPONSE)
+    if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+        raise RelayError("artifact manifest entry has an invalid sha256", EXIT_RESPONSE)
+    item: dict[str, object] = {
+        "file_token": token,
+        "name": safe_artifact_name(name),
+        "mime_type": mime_type,
+        "size_bytes": size,
+        "sha256": digest.lower(),
+    }
+    if allow_role:
+        role = value.get("role")
+        if role not in {"image", "mask"}:
+            raise RelayError("artifact input role must be image or mask", EXIT_RESPONSE)
+        item["role"] = role
+    return item
+
+
+def hash_file(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(CHUNK_SIZE)
+                if not chunk:
+                    return size, digest.hexdigest()
+                size += len(chunk)
+                digest.update(chunk)
+    except OSError as exc:
+        raise RelayError(f"cannot verify downloaded artifact {path}: {exc}", EXIT_FILESYSTEM) from exc
+
+
+def download_artifact_part(
+    lark: LarkConfig,
+    entry: Mapping[str, object],
+    part: Path,
+    timeout: float,
+    retries: int,
+) -> None:
+    part.parent.mkdir(parents=True, exist_ok=True)
+    arguments = [
+        "drive",
+        "+download",
+        "--as",
+        lark.identity,
+        "--file-token",
+        str(entry["file_token"]),
+        "--output",
+        part.name,
+        "--overwrite",
+        "--format",
+        "json",
+    ]
+    last_error: RelayError | None = None
+    for attempt in range(retries + 1):
+        try:
+            part.unlink(missing_ok=True)
+            run_lark_cli(lark, arguments, part.parent, timeout)
+            size, digest = hash_file(part)
+            if size != entry["size_bytes"] or digest.lower() != entry["sha256"]:
+                part.unlink(missing_ok=True)
+                last_error = RelayError(
+                    "downloaded artifact failed size or SHA-256 verification",
+                    EXIT_RESPONSE,
+                )
+            else:
+                return
+        except LarkCliError as exc:
+            last_error = exc
+            if not exc.retryable:
+                raise
+        except OSError as exc:
+            last_error = RelayError(f"cannot prepare artifact download: {exc}", EXIT_FILESYSTEM)
+        if attempt < retries:
+            time.sleep(retry_delay(None, attempt))
+    assert last_error is not None
+    raise last_error
+
+
+def commit_artifact_part(part: Path, target: Path, overwrite: bool) -> None:
+    try:
+        if overwrite:
+            os.replace(part, target)
+            return
+        if target.exists():
+            raise RelayError(f"output already exists: {target}; use --overwrite", EXIT_FILESYSTEM)
+        try:
+            os.link(part, target)
+            part.unlink()
+        except FileExistsError as exc:
+            raise RelayError(f"output already exists: {target}; use --overwrite", EXIT_FILESYSTEM) from exc
+        except OSError:
+            if os.name != "nt":
+                raise RelayError(
+                    f"filesystem does not support atomic no-overwrite commit: {target}",
+                    EXIT_FILESYSTEM,
+                )
+            if target.exists():
+                raise RelayError(f"output already exists: {target}; use --overwrite", EXIT_FILESYSTEM)
+            os.rename(part, target)
+    except RelayError:
+        raise
+    except OSError as exc:
+        raise RelayError(f"cannot commit downloaded artifact {target}: {exc}", EXIT_FILESYSTEM) from exc
 
 
 def save_images(
@@ -1218,6 +1806,547 @@ def run_edit(args: argparse.Namespace) -> None:
     )
 
 
+def artifact_parameters(args: argparse.Namespace) -> dict[str, object]:
+    prompt = read_prompt(args)
+    options = image_options(args)
+    if options.get("stream"):
+        raise RelayError("artifact delivery does not support --stream or --partial-images")
+    return {**options, "prompt": prompt}
+
+
+def submit_artifact_job(
+    config: RelayConfig,
+    request_id: str,
+    operation: str,
+    parameters: Mapping[str, object],
+    inputs: Sequence[Mapping[str, object]],
+    timeout: float,
+    retries: int,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "request_id": request_id,
+        "operation": operation,
+        "parameters": dict(parameters),
+        "inputs": [dict(item) for item in inputs],
+    }
+    value = artifact_json_request(
+        config,
+        "POST",
+        "artifact-jobs",
+        payload,
+        timeout,
+        retries,
+    )
+    return parse_artifact_job(value, request_id)
+
+
+def expected_image_format(entry: Mapping[str, object]) -> str:
+    by_mime = {"image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp"}
+    mime_type = str(entry.get("mime_type", "")).lower()
+    if mime_type in by_mime:
+        return by_mime[mime_type]
+    suffix = Path(str(entry.get("name", ""))).suffix.lower()
+    if suffix == ".png":
+        return "png"
+    if suffix in {".jpg", ".jpeg"}:
+        return "jpeg"
+    if suffix == ".webp":
+        return "webp"
+    raise RelayError("artifact image output has no supported image format", EXIT_RESPONSE)
+
+
+def artifact_base_target(
+    entry: Mapping[str, object],
+    output: str | None,
+    index: int,
+    count: int,
+    image: bool,
+) -> Path:
+    if output:
+        requested = Path(output).expanduser()
+        output_is_directory = requested.exists() and requested.is_dir()
+        if output_is_directory:
+            requested = requested / str(entry["name"])
+        if image:
+            return adjusted_output_path(
+                requested,
+                expected_image_format(entry),
+                0 if output_is_directory else index,
+                1 if output_is_directory else count,
+                None,
+            )
+        if count > 1 and not output_is_directory:
+            suffix = requested.suffix
+            requested = requested.with_name(f"{requested.stem}-{index + 1}{suffix}")
+        return requested
+    requested = Path(str(entry["name"]))
+    if image:
+        return adjusted_output_path(requested, expected_image_format(entry), 0, 1, None)
+    return requested
+
+
+def download_artifact_outputs(
+    lark: LarkConfig,
+    job: Mapping[str, object],
+    output: str | None,
+    overwrite: bool,
+    timeout: float,
+    retries: int,
+    image: bool,
+) -> list[dict[str, object]]:
+    raw_outputs = job.get("outputs")
+    if not isinstance(raw_outputs, list) or not raw_outputs:
+        raise RelayError("completed artifact job has no outputs", EXIT_RESPONSE)
+    outputs = [normalized_artifact_entry(item) for item in raw_outputs]
+    bases = [
+        artifact_base_target(item, output, index, len(outputs), image)
+        for index, item in enumerate(outputs)
+    ]
+    if len({str(path.resolve()) for path in bases}) != len(bases):
+        raise RelayError("artifact outputs resolve to duplicate local paths", EXIT_FILESYSTEM)
+    for target in bases:
+        preflight_target(target, overwrite)
+
+    saved: list[dict[str, object]] = []
+    for index, (entry, expected_target) in enumerate(zip(outputs, bases)):
+        expected_target.parent.mkdir(parents=True, exist_ok=True)
+        part = expected_target.parent / f".{expected_target.name}.part"
+        download_artifact_part(lark, entry, part, timeout, retries)
+        target = expected_target
+        actual_format: str | None = None
+        dimensions: tuple[int, int] | None = None
+        if image:
+            try:
+                data = part.read_bytes()
+            except OSError as exc:
+                raise RelayError(f"cannot inspect downloaded image: {exc}", EXIT_FILESYSTEM) from exc
+            actual_format = sniff_image(data)
+            dimensions = image_dimensions(data, actual_format)
+            requested = Path(output).expanduser() if output else Path(str(entry["name"]))
+            output_is_directory = bool(output and requested.exists() and requested.is_dir())
+            if output_is_directory:
+                requested = requested / str(entry["name"])
+            target = adjusted_output_path(
+                requested,
+                actual_format,
+                index if output and not output_is_directory else 0,
+                len(outputs) if output and not output_is_directory else 1,
+                None,
+            )
+            if target != expected_target:
+                preflight_target(target, overwrite)
+        commit_artifact_part(part, target, overwrite)
+        item: dict[str, object] = {
+            "path": str(target.resolve()),
+            "file_token": entry["file_token"],
+            "name": entry["name"],
+            "mime_type": entry["mime_type"],
+            "bytes": entry["size_bytes"],
+            "sha256": entry["sha256"],
+        }
+        if actual_format:
+            item["format"] = actual_format
+        if dimensions:
+            item["width"] = dimensions[0]
+            item["height"] = dimensions[1]
+        saved.append(item)
+    return saved
+
+
+def artifact_image_summary(
+    args: argparse.Namespace,
+    job: Mapping[str, object],
+    images: list[dict[str, object]],
+) -> None:
+    issues = output_contract_issues(args.size, args.output_format, images)
+    warn_dimension_mismatch(args.size, images)
+    warn_format_mismatch(args.output_format, images)
+    strict_failure = bool(args.strict_output and issues)
+    value: dict[str, object] = {
+        "ok": not strict_failure,
+        "delivery": "lark_drive",
+        "operation": job.get("operation"),
+        "endpoint": "/v1/artifact-jobs",
+        "request_id": job.get("request_id"),
+        "status": job.get("status"),
+        "model": args.model,
+        "quality": args.quality,
+        "requested_size": args.size,
+        "requested_format": args.output_format,
+        "output_contract_met": not issues,
+        "images": images,
+    }
+    if issues:
+        value["output_contract_issues"] = issues
+    print(json.dumps(value, ensure_ascii=False, indent=2))
+    if strict_failure:
+        raise RelayError(
+            "saved output does not match the requested format or dimensions",
+            EXIT_RESPONSE,
+        )
+
+
+def artifact_runtime(args: argparse.Namespace, require_target: bool) -> tuple[RelayConfig, LarkConfig]:
+    relay = resolve_config(args)
+    capabilities = artifact_capabilities(relay, args.timeout, args.request_retries)
+    lark = resolve_lark_config(args, capabilities, require_target=require_target)
+    return relay, lark
+
+
+def run_artifact_generate(args: argparse.Namespace) -> None:
+    parameters = artifact_parameters(args)
+    request_id = validate_request_id(args.request_id)
+    output_plan = dry_run_output_plan(args, "generated")
+    payload = {
+        "request_id": request_id,
+        "operation": "image.generate",
+        "parameters": parameters,
+        "inputs": [],
+    }
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "operation": "artifact-generate",
+                    "endpoint": "/v1/artifact-jobs",
+                    "payload": payload,
+                    "output": output_plan,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    eprint(f"artifact request_id: {request_id}")
+    relay, lark = artifact_runtime(args, require_target=False)
+    job = submit_artifact_job(
+        relay,
+        request_id,
+        "image.generate",
+        parameters,
+        [],
+        args.timeout,
+        args.request_retries,
+    )
+    job = wait_for_artifact_job(
+        relay,
+        job,
+        args.timeout,
+        args.request_retries,
+        args.poll_interval,
+        args.wait_timeout,
+    )
+    if job["status"] == "failed":
+        raise artifact_failure(job)
+    images = download_artifact_outputs(
+        lark,
+        job,
+        args.output,
+        args.overwrite,
+        args.timeout,
+        args.download_retries,
+        image=True,
+    )
+    if len(images) != args.n:
+        raise RelayError(
+            f"artifact job returned {len(images)} images after {args.n} were requested",
+            EXIT_RESPONSE,
+        )
+    artifact_image_summary(args, job, images)
+
+
+def upload_validated_image(
+    lark: LarkConfig,
+    item: InputFile,
+    timeout: float,
+    retries: int,
+) -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="relay-image-input-") as directory:
+        staged = Path(directory) / safe_artifact_name(item.path.name)
+        try:
+            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(item.data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise RelayError(f"cannot stage image input: {exc}", EXIT_FILESYSTEM) from exc
+        role = "mask" if item.field == "mask" else "image"
+        return upload_artifact(
+            lark,
+            str(staged),
+            timeout,
+            retries,
+            role=role,
+            mime_type_override=item.mime,
+        )
+
+
+def run_artifact_edit(args: argparse.Namespace) -> None:
+    parameters = artifact_parameters(args)
+    files = validate_edit_files(args.image, args.mask)
+    request_id = validate_request_id(args.request_id)
+    output_plan = dry_run_output_plan(args, "edited")
+    if args.dry_run:
+        inputs = [
+            {
+                "role": "mask" if item.field == "mask" else "image",
+                "path": str(item.path),
+                "name": safe_artifact_name(item.path.name),
+                "mime_type": item.mime,
+                "size_bytes": item.size,
+                "sha256": hashlib.sha256(item.data).hexdigest(),
+            }
+            for item in files
+        ]
+        print(
+            json.dumps(
+                {
+                    "operation": "artifact-edit",
+                    "endpoint": "/v1/artifact-jobs",
+                    "request_id": request_id,
+                    "parameters": parameters,
+                    "local_inputs": inputs,
+                    "output": output_plan,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    eprint(f"artifact request_id: {request_id}")
+    relay, lark = artifact_runtime(args, require_target=True)
+    uploaded: list[dict[str, object]] = []
+    try:
+        for item in files:
+            uploaded.append(
+                upload_validated_image(lark, item, args.timeout, args.upload_retries)
+            )
+    except RelayError:
+        if uploaded:
+            eprint("warning: already uploaded Lark inputs were retained for manual reuse")
+        raise
+    job = submit_artifact_job(
+        relay,
+        request_id,
+        "image.edit",
+        parameters,
+        uploaded,
+        args.timeout,
+        args.request_retries,
+    )
+    job = wait_for_artifact_job(
+        relay,
+        job,
+        args.timeout,
+        args.request_retries,
+        args.poll_interval,
+        args.wait_timeout,
+    )
+    if job["status"] == "failed":
+        raise artifact_failure(job)
+    images = download_artifact_outputs(
+        lark,
+        job,
+        args.output,
+        args.overwrite,
+        args.timeout,
+        args.download_retries,
+        image=True,
+    )
+    if len(images) != args.n:
+        raise RelayError(
+            f"artifact job returned {len(images)} images after {args.n} were requested",
+            EXIT_RESPONSE,
+        )
+    artifact_image_summary(args, job, images)
+
+
+def run_artifact_upload(args: argparse.Namespace) -> None:
+    plans: list[dict[str, object]] = []
+    for value in args.file:
+        with snapshot_artifact(value) as (_, name, size, digest, mime_type):
+            plans.append(
+                {
+                    "path": str(Path(value).expanduser().resolve()),
+                    "name": name,
+                    "mime_type": mime_type,
+                    "size_bytes": size,
+                    "sha256": digest,
+                }
+            )
+    if args.dry_run:
+        print(json.dumps({"operation": "artifact-upload", "files": plans}, ensure_ascii=False, indent=2))
+        return
+    _, lark = artifact_runtime(args, require_target=True)
+    uploaded: list[dict[str, object]] = []
+    try:
+        for value in args.file:
+            uploaded.append(upload_artifact(lark, value, args.timeout, args.upload_retries))
+    except RelayError:
+        if uploaded:
+            eprint("warning: already uploaded Lark files were retained for manual reuse")
+        raise
+    print(json.dumps({"ok": True, "delivery": "lark_drive", "inputs": uploaded}, ensure_ascii=False, indent=2))
+
+
+def read_instruction(args: argparse.Namespace) -> str:
+    if args.instruction_file:
+        try:
+            value = Path(args.instruction_file).expanduser().read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RelayError(f"cannot read instruction file: {exc}") from exc
+    else:
+        value = args.instruction or ""
+    value = value.strip()
+    if len(value) > MAX_PROMPT_CHARS:
+        raise RelayError(f"instruction exceeds {MAX_PROMPT_CHARS} characters")
+    return value
+
+
+def run_artifact_handoff(args: argparse.Namespace) -> None:
+    instruction = read_instruction(args)
+    request_id = validate_request_id(args.request_id)
+    plans: list[dict[str, object]] = []
+    for value in args.file:
+        with snapshot_artifact(value) as (_, name, size, digest, mime_type):
+            plans.append(
+                {
+                    "path": str(Path(value).expanduser().resolve()),
+                    "name": name,
+                    "mime_type": mime_type,
+                    "size_bytes": size,
+                    "sha256": digest,
+                }
+            )
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "operation": "artifact.handoff",
+                    "endpoint": "/v1/artifact-jobs",
+                    "request_id": request_id,
+                    "parameters": {"instruction": instruction},
+                    "local_inputs": plans,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    eprint(f"artifact request_id: {request_id}")
+    relay, lark = artifact_runtime(args, require_target=True)
+    uploaded: list[dict[str, object]] = []
+    try:
+        for value in args.file:
+            uploaded.append(upload_artifact(lark, value, args.timeout, args.upload_retries))
+    except RelayError:
+        if uploaded:
+            eprint("warning: already uploaded Lark files were retained for manual reuse")
+        raise
+    job = submit_artifact_job(
+        relay,
+        request_id,
+        "artifact.handoff",
+        {"instruction": instruction},
+        uploaded,
+        args.timeout,
+        args.request_retries,
+    )
+    job = wait_for_artifact_job(
+        relay,
+        job,
+        args.timeout,
+        args.request_retries,
+        args.poll_interval,
+        args.wait_timeout,
+        {"ready_for_processing", "completed", "failed"},
+    )
+    if job["status"] == "failed":
+        raise artifact_failure(job)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "delivery": "lark_drive",
+                "request_id": request_id,
+                "status": job["status"],
+                "inputs": uploaded,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def run_artifact_status(args: argparse.Namespace) -> None:
+    request_id = validate_request_id(args.request_id)
+    relay = resolve_config(args)
+    job = fetch_artifact_job(relay, request_id, args.timeout, args.request_retries)
+    terminals = {"completed", "failed"} if args.wait_completed else TERMINAL_ARTIFACT_STATUSES
+    if (args.wait or args.wait_completed) and job["status"] not in terminals:
+        job = wait_for_artifact_job(
+            relay,
+            job,
+            args.timeout,
+            args.request_retries,
+            args.poll_interval,
+            args.wait_timeout,
+            terminals,
+        )
+    print(json.dumps(job, ensure_ascii=False, indent=2))
+    if job["status"] == "failed":
+        raise artifact_failure(job)
+
+
+def run_artifact_download(args: argparse.Namespace) -> None:
+    request_id = validate_request_id(args.request_id)
+    relay = resolve_config(args)
+    job = fetch_artifact_job(relay, request_id, args.timeout, args.request_retries)
+    if args.wait and job["status"] not in {"completed", "failed"}:
+        job = wait_for_artifact_job(
+            relay,
+            job,
+            args.timeout,
+            args.request_retries,
+            args.poll_interval,
+            args.wait_timeout,
+            {"completed", "failed"},
+        )
+    if job["status"] == "failed":
+        raise artifact_failure(job)
+    if job["status"] != "completed":
+        raise RelayError(
+            f"artifact job {request_id} is {job['status']}; add --wait or retry later",
+            EXIT_NETWORK,
+        )
+    capabilities = artifact_capabilities(relay, args.timeout, args.request_retries)
+    lark = resolve_lark_config(args, capabilities, require_target=False)
+    image = str(job.get("operation", "")).startswith("image.")
+    outputs = download_artifact_outputs(
+        lark,
+        job,
+        args.output,
+        args.overwrite,
+        args.timeout,
+        args.download_retries,
+        image=image,
+    )
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "delivery": "lark_drive",
+                "request_id": request_id,
+                "status": "completed",
+                "outputs": outputs,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def run_check(args: argparse.Namespace) -> None:
     config = resolve_config(args)
     models = request(config, "GET", "models", None, None, args.timeout)
@@ -1288,6 +2417,45 @@ def run_configure(args: argparse.Namespace) -> None:
     print(json.dumps({"ok": True, "config": str(target), "base_url": base_url, "https": parsed.scheme == "https"}, ensure_ascii=False, indent=2))
 
 
+def run_artifact_configure(args: argparse.Namespace) -> None:
+    target = config_path(args.config)
+    stored = read_config(target)
+    token = args.folder_token or args.wiki_token
+    if valid_lark_token(token) is None:
+        raise RelayError("Lark target token is invalid")
+    executable = args.lark_cli or str(stored.get("lark_cli") or "lark-cli")
+    resolve_lark_executable(executable)
+    updated = dict(stored)
+    updated["lark_cli"] = executable
+    updated["lark_identity"] = args.lark_identity
+    if args.lark_profile:
+        updated["lark_profile"] = args.lark_profile
+    else:
+        updated.pop("lark_profile", None)
+    if args.folder_token:
+        updated["lark_folder_token"] = args.folder_token
+        updated.pop("lark_wiki_token", None)
+        target_type = "folder"
+    else:
+        updated["lark_wiki_token"] = args.wiki_token
+        updated.pop("lark_folder_token", None)
+        target_type = "wiki"
+    atomic_config_write(target, updated)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "config": str(target),
+                "lark_identity": args.lark_identity,
+                "input_target": target_type,
+                "token_stored": True,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", choices=("gpt-image-2",), default="gpt-image-2")
     prompt = parser.add_mutually_exclusive_group(required=False)
@@ -1313,6 +2481,40 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true")
 
 
+def add_lark_overrides(parser: argparse.ArgumentParser, target: bool = False) -> None:
+    parser.add_argument("--lark-cli", help="lark-cli executable override")
+    parser.add_argument("--lark-as", dest="lark_identity", choices=("user", "bot"))
+    parser.add_argument("--lark-profile")
+    if target:
+        location = parser.add_mutually_exclusive_group()
+        location.add_argument("--folder-token")
+        location.add_argument("--wiki-token")
+
+
+def add_artifact_runtime_options(
+    parser: argparse.ArgumentParser,
+    *,
+    upload: bool = False,
+    download: bool = False,
+    wait: bool = False,
+    target: bool = False,
+) -> None:
+    parser.add_argument("--request-retries", type=int, default=3)
+    if upload:
+        parser.add_argument(
+            "--upload-retries",
+            type=int,
+            default=0,
+            help="retries after explicit Lark network errors; may leave duplicate uploads",
+        )
+    if download:
+        parser.add_argument("--download-retries", type=int, default=3)
+    if wait:
+        parser.add_argument("--poll-interval", type=float, default=2.0)
+        parser.add_argument("--wait-timeout", type=float, default=1800.0)
+    add_lark_overrides(parser, target=target)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate and edit images through an OpenAI-compatible Codex relay."
@@ -1328,6 +2530,20 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--key-stdin", action="store_true", help="read one key line from stdin")
     configure.set_defaults(handler=run_configure)
 
+    artifact_configure = subparsers.add_parser(
+        "artifact-configure",
+        help="persist advanced Lark CLI and input-folder overrides",
+    )
+    artifact_configure.add_argument("--lark-cli")
+    artifact_configure.add_argument(
+        "--lark-as", dest="lark_identity", choices=("user", "bot"), default="bot"
+    )
+    artifact_configure.add_argument("--lark-profile")
+    artifact_location = artifact_configure.add_mutually_exclusive_group(required=True)
+    artifact_location.add_argument("--folder-token")
+    artifact_location.add_argument("--wiki-token")
+    artifact_configure.set_defaults(handler=run_artifact_configure)
+
     check = subparsers.add_parser("check", help="verify auth and image routes without generating")
     check.add_argument("--timeout", type=float, default=30.0)
     check.set_defaults(handler=run_check)
@@ -1341,6 +2557,83 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("--image", action="append", required=True, help="input image; repeat up to 16 times")
     edit.add_argument("--mask", help="optional alpha-channel PNG mask for the first input")
     edit.set_defaults(handler=run_edit)
+
+    artifact_generate = subparsers.add_parser(
+        "artifact-generate",
+        help="generate through an async job and download the result from Lark Drive",
+    )
+    add_common_options(artifact_generate)
+    artifact_generate.add_argument("--request-id")
+    add_artifact_runtime_options(artifact_generate, download=True, wait=True)
+    artifact_generate.set_defaults(handler=run_artifact_generate)
+
+    artifact_edit = subparsers.add_parser(
+        "artifact-edit",
+        help="upload local inputs to Lark, run an async edit, and download the result",
+    )
+    add_common_options(artifact_edit)
+    artifact_edit.add_argument("--image", action="append", required=True, help="input image; repeat up to 16 times")
+    artifact_edit.add_argument("--mask", help="optional alpha-channel PNG mask for the first input")
+    artifact_edit.add_argument("--request-id")
+    add_artifact_runtime_options(
+        artifact_edit,
+        upload=True,
+        download=True,
+        wait=True,
+        target=True,
+    )
+    artifact_edit.set_defaults(handler=run_artifact_edit)
+
+    artifact_upload = subparsers.add_parser(
+        "artifact-upload",
+        help="upload one or more local attachments to the relay input folder in Lark",
+    )
+    artifact_upload.add_argument("--file", action="append", required=True)
+    artifact_upload.add_argument("--timeout", type=float, default=300.0)
+    artifact_upload.add_argument("--dry-run", action="store_true")
+    add_artifact_runtime_options(artifact_upload, upload=True, target=True)
+    artifact_upload.set_defaults(handler=run_artifact_upload)
+
+    artifact_handoff = subparsers.add_parser(
+        "artifact-handoff",
+        help="upload attachments and hand them off for trusted server-side processing",
+    )
+    artifact_handoff.add_argument("--file", action="append", required=True)
+    instruction = artifact_handoff.add_mutually_exclusive_group()
+    instruction.add_argument("--instruction")
+    instruction.add_argument("--instruction-file")
+    artifact_handoff.add_argument("--request-id")
+    artifact_handoff.add_argument("--timeout", type=float, default=300.0)
+    artifact_handoff.add_argument("--dry-run", action="store_true")
+    add_artifact_runtime_options(
+        artifact_handoff,
+        upload=True,
+        wait=True,
+        target=True,
+    )
+    artifact_handoff.set_defaults(handler=run_artifact_handoff)
+
+    artifact_status = subparsers.add_parser(
+        "artifact-status", help="inspect or wait for an existing artifact job"
+    )
+    artifact_status.add_argument("--request-id", required=True)
+    status_wait = artifact_status.add_mutually_exclusive_group()
+    status_wait.add_argument("--wait", action="store_true", help="wait for handoff or completion")
+    status_wait.add_argument("--wait-completed", action="store_true", help="wait through handoff until completed")
+    artifact_status.add_argument("--timeout", type=float, default=30.0)
+    add_artifact_runtime_options(artifact_status, wait=True)
+    artifact_status.set_defaults(handler=run_artifact_status)
+
+    artifact_download = subparsers.add_parser(
+        "artifact-download", help="download completed job outputs from Lark Drive"
+    )
+    artifact_download.add_argument("--request-id", required=True)
+    artifact_download.add_argument("--wait", action="store_true")
+    artifact_download.add_argument("--output", "--out")
+    artifact_download.add_argument("--overwrite", "--force", action="store_true")
+    artifact_download.add_argument("--timeout", type=float, default=300.0)
+    add_artifact_runtime_options(artifact_download, download=True, wait=True)
+    artifact_download.set_defaults(handler=run_artifact_download)
     return parser
 
 
@@ -1350,6 +2643,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if hasattr(args, "timeout") and args.timeout <= 0:
             raise RelayError("--timeout must be positive")
+        for name in ("request_retries", "upload_retries", "download_retries"):
+            if hasattr(args, name) and getattr(args, name) < 0:
+                raise RelayError(f"--{name.replace('_', '-')} must not be negative")
+        if hasattr(args, "poll_interval") and args.poll_interval <= 0:
+            raise RelayError("--poll-interval must be positive")
+        if hasattr(args, "wait_timeout") and args.wait_timeout <= 0:
+            raise RelayError("--wait-timeout must be positive")
         args.handler(args)
         return 0
     except RelayError as exc:

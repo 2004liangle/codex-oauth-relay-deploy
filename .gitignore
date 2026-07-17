@@ -1,2 +1,5 @@
 __pycache__/
 *.py[cod]
+dist/
+/relay-artifacts.zip
+skills/relay-artifacts/assets/config.json

@@ -1,0 +1,15 @@
+{
+  "relay": {
+    "base_url": "https://relay.example.com",
+    "api_key": "REPLACE_WITH_PRIVATE_RELAY_KEY",
+    "allow_insecure_http": false,
+    "timeout_seconds": 60
+  },
+  "lark": {
+    "api_base_url": "https://open.feishu.cn",
+    "app_id": "",
+    "app_secret": "",
+    "input_folder_token": "",
+    "timeout_seconds": 120
+  }
+}
