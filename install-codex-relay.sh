@@ -7,13 +7,13 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 CLIPROXY_VERSION="7.2.80"
 KEEPER_VERSION="1.13.2"
 MANAGEMENT_VERSION="1.18.3"
-DEPLOY_RELEASE_VERSION="1.2.0"
+DEPLOY_RELEASE_VERSION="1.3.0"
 USAGE_UI_VERSION="1.13.2-plain-zh.1"
 USAGE_UI_SHA256="ce7468c31f955956300d3b668909ce84a98864ed804aeff6da3db2c5a974b4aa"
 USAGE_UI_ROOT="/opt/codex-relay-usage-ui"
 DEFAULT_PORT="8317"
 DEFAULT_TZ="Asia/Shanghai"
-INTERNAL_PORTS=(18080 18081 18317)
+INTERNAL_PORTS=(18080 18081 18317 18318)
 INSTALL_STATE_DIR="/etc/codex-relay-installer"
 OWNER_MARKER="$INSTALL_STATE_DIR/managed"
 COMPLETE_MARKER="$INSTALL_STATE_DIR/complete"
@@ -926,6 +926,9 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }
+
+    # Optional sidecars install narrowly scoped locations through this include.
+    include /etc/nginx/snippets/codex-artifact-relay-*.conf;
 
     location / {
         default_type application/json;

@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 umask 077
 
-VERSION="v1.2.0"
+VERSION="v1.3.0"
 REPOSITORY="2004liangle/codex-oauth-relay-deploy"
 RAW_BASE="https://raw.githubusercontent.com/$REPOSITORY/$VERSION/skills/relay-images"
 TARGET="${CODEX_HOME:-$HOME/.codex}/skills/relay-images"
@@ -11,12 +11,13 @@ STAGING=""
 
 manifest() {
   cat <<'EOF'
-079fad860247be772b50aefbac6429c6d67d4af091b50abd89cb60b4360f5ab1  SKILL.md
-bc8a1fbfae418bfc107b0906328c46c0bb841bbadf765e094f04f5ca75e618f1  agents/openai.yaml
-372b15682c52ba74a78ce9a739e9024ac8f925b701e34337933e52083f2b3ce3  references/image-options.md
+e213f57518351052c0c54f0457b59545d111a9c7813611f7e02224d18e932ed5  SKILL.md
+76afe8c81c460531e37582e0ff3126ab0eaa376e090aa3b45d842732e79b2d45  agents/openai.yaml
+0439e9657cedcc37989d0206d05739faf0c5b8047d7c47075e32e4cc947b3c61  references/artifact-delivery.md
+10d804dbdac45a1faa1090d231bf717b86d4721040c744c5875b7bcda28d0054  references/image-options.md
 b15a40a55251783e9ee6e4354591bff65e4311157137da9037aad9720bfe25a4  references/prompting.md
-f94031008d8347f53f86337031ec9485c0158a07644c017fe8d403c99d3b602e  references/relay-contract.md
-159f129e90ea13149b2c7becc8a0819321f85f6e06a9465b86fed45567e29d78  scripts/relay_images.py
+b01e0363071940416b3f5ef9ccfd21dc73cc7c4ba65c2f828ecf15dbb4fdeca8  references/relay-contract.md
+b85c12ed82092e13868ec84cc321f901fba4c8c18acab17949601cd7d400fc54  scripts/relay_images.py
 EOF
 }
 

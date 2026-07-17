@@ -69,6 +69,8 @@ Treat `size` as the requested size, then inspect the decoded file. The current C
 
 ## Streaming
 
+Streaming and partial previews are available only with the direct `generate`/`edit` commands. `artifact-generate` and `artifact-edit` deliver completed files through Lark and reject these options.
+
 | Parameter | Values | Guidance |
 | --- | --- | --- |
 | `stream` | `true`, `false` | Default to non-streaming. Enable only for requested or useful progress previews. |
