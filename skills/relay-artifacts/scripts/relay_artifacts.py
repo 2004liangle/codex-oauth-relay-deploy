@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable client for asynchronous relay jobs delivered through Lark Drive."""
+"""通过飞书云盘传输异步中转任务的便携客户端。"""
 
 from __future__ import annotations
 
@@ -55,6 +55,67 @@ class ToolError(Exception):
         self.exit_code = exit_code
 
 
+def translated_argparse_error(message: str) -> str:
+    patterns = (
+        (r"the following arguments are required: (.+)", "缺少必填参数: %s"),
+        (r"one of the arguments (.+) is required", "必须提供以下参数之一: %s"),
+        (r"unrecognized arguments: (.+)", "无法识别的参数: %s"),
+        (
+            r"argument (.+): invalid choice: (.+) \(choose from (.+)\)",
+            "参数 %s 的选项无效: %s（可选值: %s）",
+        ),
+        (r"argument (.+): invalid choice: (.+)", "参数 %s 的选项无效: %s"),
+        (r"argument (.+): expected one argument", "参数 %s 需要一个值"),
+        (r"argument (.+): expected at most one argument", "参数 %s 最多只能有一个值"),
+        (r"argument (.+): expected at least one argument", "参数 %s 至少需要一个值"),
+        (r"argument (.+): expected (.+) argument", "参数 %s 需要 %s 个值"),
+        (r"argument (.+): expected (.+) arguments", "参数 %s 需要 %s 个值"),
+        (r"argument (.+): not allowed with argument (.+)", "参数 %s 不能与 %s 同时使用"),
+        (r"argument (.+): ignored explicit argument (.+)", "参数 %s 不能直接附带值 %s"),
+        (r"argument (.+): invalid .+ value: (.+)", "参数 %s 的值无效: %s"),
+        (r"ambiguous option: (.+) could match (.+)", "选项 %s 不明确，可能匹配 %s"),
+        (r"unexpected option string: (.+)", "出现了不应存在的选项: %s"),
+        (r"argument (.+): unknown parser (.+) \(choices: (.+)\)", "参数 %s 指定了未知命令 %s（可选值: %s）"),
+    )
+    for pattern, template in patterns:
+        match = re.fullmatch(pattern, message)
+        if match:
+            return template % match.groups()
+    related = re.findall(
+        r"(?<!\w)--?[A-Za-z0-9][A-Za-z0-9._-]*|'[^'\n]{1,80}'|\"[^\"\n]{1,80}\"|\b\d+\b",
+        message,
+    )
+    if related:
+        return "参数解析失败，相关内容: %s；请使用 --help 查看具体用法" % ", ".join(related)
+    return "参数解析失败；请使用 --help 查看具体用法"
+
+
+class ChineseHelpFormatter(argparse.HelpFormatter):
+    def add_usage(
+        self,
+        usage: Optional[str],
+        actions: Sequence[argparse.Action],
+        groups: Sequence[argparse._MutuallyExclusiveGroup],
+        prefix: Optional[str] = None,
+    ) -> None:
+        super().add_usage(usage, actions, groups, "用法: " if prefix is None else prefix)
+
+
+class ChineseArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        add_help = bool(kwargs.pop("add_help", True))
+        kwargs.setdefault("formatter_class", ChineseHelpFormatter)
+        super().__init__(*args, add_help=False, **kwargs)
+        self._positionals.title = "位置参数"
+        self._optionals.title = "选项"
+        if add_help:
+            self.add_argument("-h", "--help", action="help", help="显示此帮助信息并退出")
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(2, "%s: 错误: %s\n" % (self.prog, translated_argparse_error(message)))
+
+
 @dataclass(frozen=True)
 class Config:
     relay_base_url: str
@@ -89,7 +150,7 @@ def section(value: object, name: str) -> Mapping[str, Any]:
     if item is None:
         return {}
     if not isinstance(item, dict):
-        raise ToolError("invalid_config", "configuration section %s must be an object" % name)
+        raise ToolError("invalid_config", "配置节 %s 必须是对象" % name)
     return item
 
 
@@ -99,9 +160,9 @@ def positive_float(value: object, name: str, default: float) -> float:
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
-        raise ToolError("invalid_config", "%s must be a number" % name) from exc
+        raise ToolError("invalid_config", "%s 必须是数字" % name) from exc
     if result <= 0:
-        raise ToolError("invalid_config", "%s must be positive" % name)
+        raise ToolError("invalid_config", "%s 必须大于 0" % name)
     return result
 
 
@@ -116,11 +177,11 @@ def load_config(args: argparse.Namespace) -> Config:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except OSError as exc:
-            raise ToolError("config_unreadable", "private configuration file cannot be read") from exc
+            raise ToolError("config_unreadable", "无法读取私有配置文件") from exc
         except json.JSONDecodeError as exc:
-            raise ToolError("invalid_config", "private configuration file is not valid JSON") from exc
+            raise ToolError("invalid_config", "私有配置文件不是有效的 JSON") from exc
         if not isinstance(raw, dict):
-            raise ToolError("invalid_config", "configuration root must be an object")
+            raise ToolError("invalid_config", "配置根节点必须是对象")
 
     relay = section(raw, "relay")
     lark = section(raw, "lark")
@@ -157,16 +218,16 @@ def is_placeholder(value: str) -> bool:
 
 def validate_url(value: str, label: str, *, allow_http: bool) -> str:
     if not value:
-        raise ToolError("missing_config", "%s is not configured" % label)
+        raise ToolError("missing_config", "尚未配置 %s" % label)
     parsed = urllib.parse.urlsplit(value)
     if parsed.scheme not in {"https", "http"} or not parsed.hostname:
-        raise ToolError("invalid_config", "%s must be an absolute HTTP(S) URL" % label)
+        raise ToolError("invalid_config", "%s 必须是绝对 HTTP(S) URL" % label)
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ToolError("invalid_config", "%s must not contain credentials, a query, or a fragment" % label)
+        raise ToolError("invalid_config", "%s 不能包含凭据、查询参数或片段" % label)
     if parsed.scheme == "http" and not allow_http:
         raise ToolError(
             "insecure_http_disabled",
-            "%s uses plain HTTP; enable it only after the user accepts the transport risk" % label,
+            "%s 使用明文 HTTP；仅可在用户明确接受传输风险后启用" % label,
         )
     return value.rstrip("/")
 
@@ -185,21 +246,21 @@ def require_relay(config: Config) -> Tuple[str, str]:
     elif path:
         raise ToolError(
             "invalid_config",
-            "relay.base_url must be an origin or end at /v1",
+            "relay.base_url 必须是站点根地址，或以 /v1 结尾",
         )
     if is_placeholder(config.relay_api_key):
-        raise ToolError("missing_config", "relay.api_key is not configured")
+        raise ToolError("missing_config", "尚未配置 relay.api_key")
     if "\r" in config.relay_api_key or "\n" in config.relay_api_key:
-        raise ToolError("invalid_config", "relay.api_key contains invalid characters")
+        raise ToolError("invalid_config", "relay.api_key 包含无效字符")
     return base, config.relay_api_key
 
 
 def require_lark(config: Config) -> Tuple[str, str, str]:
     base = validate_url(config.lark_api_base_url, "lark.api_base_url", allow_http=False)
     if is_placeholder(config.lark_app_id):
-        raise ToolError("missing_config", "lark.app_id is not configured")
+        raise ToolError("missing_config", "尚未配置 lark.app_id")
     if is_placeholder(config.lark_app_secret):
-        raise ToolError("missing_config", "lark.app_secret is not configured")
+        raise ToolError("missing_config", "尚未配置 lark.app_secret")
     return base, config.lark_app_id, config.lark_app_secret
 
 
@@ -253,13 +314,13 @@ def request_json(
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read(MAX_JSON_BYTES + 1)
             if len(raw) > MAX_JSON_BYTES:
-                raise ToolError("response_too_large", "%s returned an oversized JSON response" % service)
+                raise ToolError("response_too_large", "%s 返回的 JSON 响应过大" % service)
             try:
                 value = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ToolError("invalid_response", "%s returned invalid JSON" % service) from exc
+                raise ToolError("invalid_response", "%s 返回了无效 JSON" % service) from exc
             if not isinstance(value, dict):
-                raise ToolError("invalid_response", "%s returned a non-object JSON response" % service)
+                raise ToolError("invalid_response", "%s 返回的 JSON 响应不是对象" % service)
             return value
         except urllib.error.HTTPError as exc:
             retryable = exc.code == 429 or 500 <= exc.code <= 599
@@ -270,7 +331,7 @@ def request_json(
             details.update(remote_error_details(exc.read(65536)))
             raise ToolError(
                 "%s_http_error" % service,
-                "%s request failed with HTTP %d" % (service, exc.code),
+                "%s 请求失败，HTTP 状态码为 %d" % (service, exc.code),
                 retryable=retryable,
                 details=details,
                 exit_code=3,
@@ -281,7 +342,7 @@ def request_json(
                 continue
             raise ToolError(
                 "%s_network_error" % service,
-                "%s could not be reached" % service,
+                "无法连接到 %s" % service,
                 retryable=True,
                 exit_code=3,
             ) from exc
@@ -346,7 +407,7 @@ def multipart_body(
     chunks: List[bytes] = []
     for name, value in fields.items():
         if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
-            raise ToolError("invalid_multipart", "multipart field name is invalid")
+            raise ToolError("invalid_multipart", "multipart 字段名无效")
         chunks.extend(
             [
                 ("--%s\r\n" % boundary).encode("ascii"),
@@ -392,7 +453,7 @@ def sniff_mime(path: Path) -> str:
         with path.open("rb") as handle:
             header = handle.read(16)
     except OSError as exc:
-        raise ToolError("input_unreadable", "input file cannot be read: %s" % path.name) from exc
+        raise ToolError("input_unreadable", "无法读取输入文件: %s" % path.name) from exc
     if header.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if header.startswith(b"\xff\xd8\xff"):
@@ -416,7 +477,7 @@ def lark_data(value: Mapping[str, Any], operation: str) -> Mapping[str, Any]:
             details["remote_message"] = message[:300]
         raise ToolError(
             "lark_api_error",
-            "Lark/Feishu %s failed" % operation,
+            "Lark/飞书%s失败" % operation,
             retryable=isinstance(code, int) and code in LARK_RETRYABLE_CODES,
             details=details,
             exit_code=3,
@@ -425,7 +486,7 @@ def lark_data(value: Mapping[str, Any], operation: str) -> Mapping[str, Any]:
     if data is None:
         return {}
     if not isinstance(data, dict):
-        raise ToolError("invalid_response", "Lark/Feishu returned invalid response data")
+        raise ToolError("invalid_response", "Lark/飞书返回了无效响应数据")
     return data
 
 
@@ -448,7 +509,7 @@ class LarkClient:
             service="lark",
         )
         if value.get("code") != 0 or not isinstance(value.get("tenant_access_token"), str):
-            raise ToolError("lark_auth_failed", "Lark/Feishu app authentication failed", exit_code=3)
+            raise ToolError("lark_auth_failed", "Lark/飞书应用身份验证失败", exit_code=3)
         self._token = str(value["tenant_access_token"])
         return self._token
 
@@ -494,13 +555,13 @@ class LarkClient:
 
     def upload(self, path: Path, folder_token: str) -> Dict[str, Any]:
         if not path.is_file():
-            raise ToolError("input_not_found", "input file does not exist: %s" % path.name)
+            raise ToolError("input_not_found", "输入文件不存在: %s" % path.name)
         try:
             declared_size = path.stat().st_size
         except OSError as exc:
-            raise ToolError("input_unreadable", "input file cannot be inspected: %s" % path.name) from exc
+            raise ToolError("input_unreadable", "无法检查输入文件: %s" % path.name) from exc
         if declared_size <= 0:
-            raise ToolError("empty_input", "empty files cannot be uploaded: %s" % path.name)
+            raise ToolError("empty_input", "不能上传空文件: %s" % path.name)
         name = safe_file_name(path.name)
         mime_type = sniff_mime(path)
         if declared_size <= MAX_SINGLE_UPLOAD:
@@ -518,9 +579,9 @@ class LarkClient:
         try:
             data = path.read_bytes()
         except OSError as exc:
-            raise ToolError("input_unreadable", "input file cannot be read: %s" % name) from exc
+            raise ToolError("input_unreadable", "无法读取输入文件: %s" % name) from exc
         if len(data) != declared_size:
-            raise ToolError("input_changed", "input file changed while it was being read: %s" % name)
+            raise ToolError("input_changed", "读取期间输入文件发生变化: %s" % name)
         digest = hashlib.sha256(data).hexdigest()
         fields = {
             "file_name": name,
@@ -533,11 +594,11 @@ class LarkClient:
             "/open-apis/drive/v1/files/upload_all",
             multipart=multipart_body(fields, data, mime_type=mime_type),
             retries=0,
-            operation="single-file upload",
+            operation="单文件上传",
         )
         token = result.get("file_token")
         if not isinstance(token, str) or not token:
-            raise ToolError("invalid_response", "Lark/Feishu upload did not return a file token")
+            raise ToolError("invalid_response", "Lark/飞书上传未返回文件 token")
         return {
             "file_token": token,
             "name": name,
@@ -563,18 +624,18 @@ class LarkClient:
                 "size": declared_size,
             },
             retries=3,
-            operation="multipart prepare",
+            operation="分片上传准备",
         )
         upload_id = prepared.get("upload_id")
         block_size = prepared.get("block_size")
         block_num = prepared.get("block_num")
         if not isinstance(upload_id, str) or not upload_id:
-            raise ToolError("invalid_response", "multipart prepare did not return an upload ID")
+            raise ToolError("invalid_response", "分片上传准备未返回 upload ID")
         if isinstance(block_size, bool) or not isinstance(block_size, int) or not 0 < block_size <= MAX_MULTIPART_BLOCK:
-            raise ToolError("invalid_response", "multipart prepare returned an unsupported block size")
+            raise ToolError("invalid_response", "分片上传准备返回了不支持的分块大小")
         expected_blocks = (declared_size + block_size - 1) // block_size
         if isinstance(block_num, bool) or not isinstance(block_num, int) or block_num != expected_blocks:
-            raise ToolError("invalid_response", "multipart prepare returned an inconsistent block count")
+            raise ToolError("invalid_response", "分片上传准备返回的分块数量不一致")
 
         digest = hashlib.sha256()
         uploaded = 0
@@ -584,7 +645,7 @@ class LarkClient:
                     chunk = handle.read(block_size)
                     expected = min(block_size, declared_size - uploaded)
                     if len(chunk) != expected:
-                        raise ToolError("input_changed", "input file changed during upload: %s" % name)
+                        raise ToolError("input_changed", "上传期间输入文件发生变化: %s" % name)
                     digest.update(chunk)
                     uploaded += len(chunk)
                     fields = {
@@ -597,23 +658,23 @@ class LarkClient:
                         "/open-apis/drive/v1/files/upload_part",
                         multipart=multipart_body(fields, chunk, mime_type=mime_type),
                         retries=3,
-                        operation="multipart block upload",
+                        operation="分片块上传",
                     )
                 if handle.read(1):
-                    raise ToolError("input_changed", "input file changed during upload: %s" % name)
+                    raise ToolError("input_changed", "上传期间输入文件发生变化: %s" % name)
         except OSError as exc:
-            raise ToolError("input_unreadable", "input file cannot be read: %s" % name) from exc
+            raise ToolError("input_unreadable", "无法读取输入文件: %s" % name) from exc
         if uploaded != declared_size:
-            raise ToolError("input_changed", "input file changed during upload: %s" % name)
+            raise ToolError("input_changed", "上传期间输入文件发生变化: %s" % name)
         finished = self._call(
             "/open-apis/drive/v1/files/upload_finish",
             payload={"upload_id": upload_id, "block_num": block_num},
             retries=3,
-            operation="multipart finish",
+            operation="分片上传完成",
         )
         token = finished.get("file_token")
         if not isinstance(token, str) or not token:
-            raise ToolError("invalid_response", "multipart finish did not return a file token")
+            raise ToolError("invalid_response", "分片上传完成接口未返回文件 token")
         return {
             "file_token": token,
             "name": name,
@@ -634,13 +695,13 @@ class LarkClient:
         size = manifest.get("size_bytes")
         expected_digest = manifest.get("sha256")
         if not isinstance(token, str) or not token:
-            raise ToolError("invalid_manifest", "output manifest has no file token")
+            raise ToolError("invalid_manifest", "输出清单缺少文件 token")
         if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
-            raise ToolError("invalid_manifest", "output manifest has an invalid size")
+            raise ToolError("invalid_manifest", "输出清单的文件大小无效")
         if not isinstance(expected_digest, str) or not SHA256_RE.fullmatch(expected_digest):
-            raise ToolError("invalid_manifest", "output manifest has an invalid SHA-256")
+            raise ToolError("invalid_manifest", "输出清单的 SHA-256 无效")
         if destination.exists() and not overwrite:
-            raise ToolError("output_exists", "output already exists: %s" % destination)
+            raise ToolError("output_exists", "输出文件已存在: %s" % destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         part = destination.parent / (".%s.part" % destination.name)
         url = self.base_url + "/open-apis/drive/v1/files/" + urllib.parse.quote(token, safe="") + "/download"
@@ -664,14 +725,14 @@ class LarkClient:
                         elif offset and status != 206:
                             raise ToolError(
                                 "range_not_supported",
-                                "Lark/Feishu returned an invalid resume response",
+                                "Lark/飞书返回了无效的断点续传响应",
                                 retryable=True,
                                 exit_code=3,
                             )
                         elif not offset and status not in {200, 206}:
                             raise ToolError(
                                 "download_http_error",
-                                "Lark/Feishu download returned HTTP %d" % status,
+                                "Lark/飞书下载返回 HTTP 状态码 %d" % status,
                                 retryable=status == 429 or status >= 500,
                                 exit_code=3,
                             )
@@ -684,12 +745,12 @@ class LarkClient:
                                     break
                                 handle.write(chunk)
                                 if handle.tell() > size:
-                                    raise ToolError("download_too_large", "download exceeded the declared size")
+                                    raise ToolError("download_too_large", "下载内容超过清单声明的大小")
                     current = part.stat().st_size
                     if current < size:
                         raise ToolError(
                             "download_incomplete",
-                            "download ended before the declared size",
+                            "下载在达到清单声明的大小前结束",
                             retryable=True,
                             exit_code=3,
                         )
@@ -698,7 +759,7 @@ class LarkClient:
                     retryable = exc.code == 429 or 500 <= exc.code <= 599
                     error = ToolError(
                         "download_http_error",
-                        "Lark/Feishu download failed with HTTP %d" % exc.code,
+                        "Lark/飞书下载失败，HTTP 状态码为 %d" % exc.code,
                         retryable=retryable,
                         details={"http_status": exc.code},
                         exit_code=3,
@@ -721,7 +782,7 @@ class LarkClient:
                         continue
                     raise ToolError(
                         "download_network_error",
-                        "Lark/Feishu download was interrupted; the partial file was retained",
+                        "Lark/飞书下载中断；已保留部分文件以便续传",
                         retryable=True,
                         exit_code=3,
                     ) from exc
@@ -741,7 +802,7 @@ class LarkClient:
                 continue
             raise ToolError(
                 "download_integrity_mismatch",
-                "downloaded file did not match its size and SHA-256 manifest",
+                "下载文件的大小或 SHA-256 与清单不符",
                 exit_code=4,
             )
         raise AssertionError("unreachable")
@@ -759,24 +820,24 @@ def hash_file(path: Path) -> Tuple[int, str]:
                 size += len(chunk)
                 digest.update(chunk)
     except OSError as exc:
-        raise ToolError("file_unreadable", "file cannot be read: %s" % path.name) from exc
+        raise ToolError("file_unreadable", "无法读取文件: %s" % path.name) from exc
     return size, digest.hexdigest()
 
 
 def json_argument(value: str, label: str) -> object:
     if value.startswith("@"):
         if len(value) == 1:
-            raise ToolError("invalid_arguments", "%s @path is empty" % label)
+            raise ToolError("invalid_arguments", "%s 的 @path 为空" % label)
         try:
             raw = Path(value[1:]).expanduser().read_text(encoding="utf-8")
         except OSError as exc:
-            raise ToolError("manifest_unreadable", "%s file cannot be read" % label) from exc
+            raise ToolError("manifest_unreadable", "无法读取%s文件" % label) from exc
     else:
         raw = value
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ToolError("invalid_manifest", "%s is not valid JSON" % label) from exc
+        raise ToolError("invalid_manifest", "%s不是有效的 JSON" % label) from exc
 
 
 def validate_input_manifest(
@@ -786,10 +847,10 @@ def validate_input_manifest(
     default_role: str,
 ) -> Dict[str, Any]:
     if not isinstance(value, dict):
-        raise ToolError("invalid_manifest", "input manifest must be a JSON object")
+        raise ToolError("invalid_manifest", "输入清单必须是 JSON 对象")
     allowed = {"file_token", "name", "mime_type", "size_bytes", "sha256", "role"}
     if set(value) - allowed:
-        raise ToolError("invalid_manifest", "input manifest contains unsupported fields")
+        raise ToolError("invalid_manifest", "输入清单包含不支持的字段")
     token = value.get("file_token")
     name = value.get("name")
     mime_type = value.get("mime_type", "application/octet-stream")
@@ -797,17 +858,17 @@ def validate_input_manifest(
     digest = value.get("sha256")
     role = value.get("role", default_role)
     if not isinstance(token, str) or not TOKEN_RE.fullmatch(token):
-        raise ToolError("invalid_manifest", "input manifest file_token is invalid")
+        raise ToolError("invalid_manifest", "输入清单的 file_token 无效")
     if not isinstance(name, str) or not name or safe_file_name(name, "") != name:
-        raise ToolError("invalid_manifest", "input manifest name must be a safe base name")
+        raise ToolError("invalid_manifest", "输入清单的 name 必须是安全的文件基本名")
     if not isinstance(mime_type, str) or not MIME_RE.fullmatch(mime_type):
-        raise ToolError("invalid_manifest", "input manifest mime_type is invalid")
+        raise ToolError("invalid_manifest", "输入清单的 mime_type 无效")
     if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
-        raise ToolError("invalid_manifest", "input manifest size_bytes is invalid")
+        raise ToolError("invalid_manifest", "输入清单的 size_bytes 无效")
     if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
-        raise ToolError("invalid_manifest", "input manifest sha256 is invalid")
+        raise ToolError("invalid_manifest", "输入清单的 sha256 无效")
     if role not in allowed_roles:
-        raise ToolError("invalid_manifest", "input manifest role is invalid for this operation")
+        raise ToolError("invalid_manifest", "输入清单的 role 不适用于当前操作")
     return {
         "file_token": token,
         "name": name,
@@ -826,7 +887,7 @@ def input_manifests(
 ) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for raw in values:
-        parsed = json_argument(raw, "input manifest")
+        parsed = json_argument(raw, "输入清单")
         if (
             isinstance(parsed, dict)
             and parsed.get("ok") is True
@@ -847,7 +908,7 @@ def input_manifests(
 
 def validate_request_id(value: str) -> str:
     if not REQUEST_ID_RE.fullmatch(value):
-        raise ToolError("invalid_request_id", "request ID must contain 8-128 safe ASCII characters")
+        raise ToolError("invalid_request_id", "request ID 必须包含 8-128 个安全 ASCII 字符")
     return value
 
 
@@ -863,20 +924,20 @@ def read_text(value: Optional[str], path_value: Optional[str], label: str, *, re
         try:
             result = Path(path_value).read_text(encoding="utf-8")
         except OSError as exc:
-            raise ToolError("text_unreadable", "%s file cannot be read" % label) from exc
+            raise ToolError("text_unreadable", "无法读取%s文件" % label) from exc
     else:
         result = ""
     if required and not result.strip():
-        raise ToolError("missing_text", "%s is required" % label)
+        raise ToolError("missing_text", "必须提供%s" % label)
     if len(result) > 100000:
-        raise ToolError("text_too_long", "%s exceeds 100,000 characters" % label)
+        raise ToolError("text_too_long", "%s超过 100,000 个字符" % label)
     return result
 
 
 def check_capability(capabilities: Mapping[str, Any], operation: str) -> None:
     operations = capabilities.get("operations")
     if not isinstance(operations, list) or operation not in operations:
-        raise ToolError("unsupported_operation", "relay does not advertise %s" % operation)
+        raise ToolError("unsupported_operation", "中转服务未声明支持 %s" % operation)
 
 
 def input_folder(config: Config, capabilities: Mapping[str, Any]) -> str:
@@ -884,16 +945,16 @@ def input_folder(config: Config, capabilities: Mapping[str, Any]) -> str:
         return config.lark_input_folder_token
     target = capabilities.get("input_target")
     if not isinstance(target, dict):
-        raise ToolError("invalid_capabilities", "relay did not advertise an input target")
+        raise ToolError("invalid_capabilities", "中转服务未声明输入目标")
     target_type = target.get("type")
     token = target.get("token")
     if target_type != "folder":
         raise ToolError(
             "unsupported_input_target",
-            "portable direct upload requires a Lark/Feishu Drive folder target",
+            "便携直传模式要求输入目标是 Lark/飞书云盘文件夹",
         )
     if not isinstance(token, str) or not token:
-        raise ToolError("invalid_capabilities", "relay input folder token is missing")
+        raise ToolError("invalid_capabilities", "中转服务缺少输入文件夹 token")
     return token
 
 
@@ -917,7 +978,7 @@ def wait_for_job(
                     details[key] = error[key]
             raise ToolError(
                 "artifact_job_failed",
-                "artifact job failed",
+                "附件任务失败",
                 retryable=bool(error.get("retryable", False)),
                 details=details,
                 exit_code=4,
@@ -925,11 +986,11 @@ def wait_for_job(
         if status == "completed" or (status == "ready_for_processing" and not require_completed):
             return job
         if status not in ACTIVE_STATUSES and status != "ready_for_processing":
-            raise ToolError("invalid_job_status", "relay returned an unknown job status")
+            raise ToolError("invalid_job_status", "中转服务返回了未知任务状态")
         if time.monotonic() >= deadline:
             raise ToolError(
                 "wait_timeout",
-                "job is still running; continue with the same request ID",
+                "任务仍在运行；请使用相同的 request ID 继续查询",
                 retryable=True,
                 details={"request_id": request_id, "status": status},
                 exit_code=3,
@@ -939,13 +1000,13 @@ def wait_for_job(
 
 def preflight_files(values: Sequence[str], minimum: int, maximum: int) -> List[Path]:
     if not minimum <= len(values) <= maximum:
-        raise ToolError("invalid_input_count", "expected %d-%d input files" % (minimum, maximum))
+        raise ToolError("invalid_input_count", "需要 %d-%d 个输入文件" % (minimum, maximum))
     paths = [Path(value).expanduser().resolve() for value in values]
     for path in paths:
         if not path.is_file():
-            raise ToolError("input_not_found", "input file does not exist: %s" % path.name)
+            raise ToolError("input_not_found", "输入文件不存在: %s" % path.name)
         if path.stat().st_size <= 0:
-            raise ToolError("empty_input", "empty files cannot be uploaded: %s" % path.name)
+            raise ToolError("empty_input", "不能上传空文件: %s" % path.name)
     return paths
 
 
@@ -953,14 +1014,14 @@ def verify_total_size(paths: Sequence[Path], capabilities: Mapping[str, Any]) ->
     limit = capabilities.get("max_input_bytes")
     total = sum(path.stat().st_size for path in paths)
     if isinstance(limit, int) and not isinstance(limit, bool) and total > limit:
-        raise ToolError("inputs_too_large", "local inputs exceed the relay's advertised limit")
+        raise ToolError("inputs_too_large", "本地输入超过中转服务声明的大小限制")
 
 
 def verify_manifest_total(manifests: Sequence[Mapping[str, Any]], capabilities: Mapping[str, Any]) -> None:
     limit = capabilities.get("max_input_bytes")
     total = sum(int(item["size_bytes"]) for item in manifests)
     if isinstance(limit, int) and not isinstance(limit, bool) and total > limit:
-        raise ToolError("inputs_too_large", "input manifests exceed the relay's advertised limit")
+        raise ToolError("inputs_too_large", "输入清单超过中转服务声明的大小限制")
 
 
 def image_parameters(args: argparse.Namespace, prompt: str) -> Dict[str, Any]:
@@ -992,25 +1053,25 @@ def result_with_downloads(
     if output_dir is None:
         return result
     if job.get("status") != "completed":
-        raise ToolError("job_not_completed", "job has no downloadable completed outputs")
+        raise ToolError("job_not_completed", "任务尚无可下载的已完成输出")
     outputs = job.get("outputs")
     if not isinstance(outputs, list) or not outputs:
-        raise ToolError("no_outputs", "completed job has no output manifests")
+        raise ToolError("no_outputs", "已完成任务没有输出清单")
     target = Path(output_dir).expanduser().resolve()
     destinations: List[Path] = []
     seen = set()
     for index, item in enumerate(outputs):
         if not isinstance(item, dict):
-            raise ToolError("invalid_manifest", "job output manifest is invalid")
+            raise ToolError("invalid_manifest", "任务输出清单无效")
         raw_name = item.get("name")
         name = safe_file_name(str(raw_name or "artifact-%d.bin" % (index + 1)))
         if name in seen:
-            raise ToolError("duplicate_output_name", "job contains duplicate output names")
+            raise ToolError("duplicate_output_name", "任务包含重复的输出文件名")
         seen.add(name)
         destinations.append(target / name)
     for destination in destinations:
         if destination.exists() and not overwrite:
-            raise ToolError("output_exists", "output already exists: %s" % destination)
+            raise ToolError("output_exists", "输出文件已存在: %s" % destination)
     lark = LarkClient(config)
     downloaded = []
     for manifest, destination in zip(outputs, destinations):
@@ -1027,7 +1088,7 @@ def command_capabilities(args: argparse.Namespace) -> Dict[str, Any]:
 def command_manifest(args: argparse.Namespace) -> Dict[str, Any]:
     path = preflight_files([args.file], 1, 1)[0]
     if not TOKEN_RE.fullmatch(args.file_token):
-        raise ToolError("invalid_manifest", "--file-token is invalid")
+        raise ToolError("invalid_manifest", "--file-token 无效")
     size, digest = hash_file(path)
     return {
         "ok": True,
@@ -1066,7 +1127,7 @@ def command_generate(args: argparse.Namespace) -> Dict[str, Any]:
             require_completed=True,
         )
     elif args.download_dir:
-        raise ToolError("invalid_arguments", "--download-dir requires --wait")
+        raise ToolError("invalid_arguments", "使用 --download-dir 时必须同时使用 --wait")
     return result_with_downloads(config, job, args.download_dir, args.overwrite)
 
 
@@ -1086,7 +1147,7 @@ def command_submit_edit(args: argparse.Namespace) -> Dict[str, Any]:
     if not 1 <= len(images) <= 16 or len(masks) > 1:
         raise ToolError(
             "invalid_input_count",
-            "submit-edit requires 1-16 image manifests and at most one mask",
+            "submit-edit 需要 1-16 个图片清单，且最多包含一个蒙版",
         )
     verify_manifest_total(manifests, capabilities)
     request_id = validate_request_id(args.request_id) if args.request_id else new_request_id()
@@ -1107,7 +1168,7 @@ def command_submit_edit(args: argparse.Namespace) -> Dict[str, Any]:
             require_completed=True,
         )
     elif args.download_dir:
-        raise ToolError("invalid_arguments", "--download-dir requires --wait")
+        raise ToolError("invalid_arguments", "使用 --download-dir 时必须同时使用 --wait")
     return result_with_downloads(config, job, args.download_dir, args.overwrite)
 
 
@@ -1122,7 +1183,7 @@ def command_submit_handoff(args: argparse.Namespace) -> Dict[str, Any]:
         default_role="attachment",
     )
     if not 1 <= len(manifests) <= 32:
-        raise ToolError("invalid_input_count", "submit-handoff requires 1-32 attachment manifests")
+        raise ToolError("invalid_input_count", "submit-handoff 需要 1-32 个附件清单")
     verify_manifest_total(manifests, capabilities)
     instruction = read_text(
         args.instruction,
@@ -1154,12 +1215,12 @@ def command_submit_handoff(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def command_submit_job(args: argparse.Namespace) -> Dict[str, Any]:
-    payload = json_argument(args.job_manifest, "job manifest")
+    payload = json_argument(args.job_manifest, "任务清单")
     if not isinstance(payload, dict):
-        raise ToolError("invalid_manifest", "job manifest must be a JSON object")
+        raise ToolError("invalid_manifest", "任务清单必须是 JSON 对象")
     request_id = payload.get("request_id")
     if not isinstance(request_id, str):
-        raise ToolError("invalid_manifest", "job manifest request_id is required")
+        raise ToolError("invalid_manifest", "任务清单必须包含 request_id")
     validate_request_id(request_id)
     relay = RelayClient(load_config(args))
     job = relay.submit(payload)
@@ -1213,7 +1274,7 @@ def command_edit(args: argparse.Namespace) -> Dict[str, Any]:
             require_completed=True,
         )
     elif args.download_dir:
-        raise ToolError("invalid_arguments", "--download-dir requires --wait")
+        raise ToolError("invalid_arguments", "使用 --download-dir 时必须同时使用 --wait")
     return result_with_downloads(config, job, args.download_dir, args.overwrite)
 
 
@@ -1292,7 +1353,7 @@ def command_download(args: argparse.Namespace) -> Dict[str, Any]:
     if job.get("status") != "completed":
         raise ToolError(
             "job_not_completed",
-            "job is not completed; retry download with --wait or inspect status",
+            "任务尚未完成；请使用 --wait 重试下载，或查询任务状态",
             retryable=True,
             details={"request_id": request_id, "status": job.get("status")},
             exit_code=3,
@@ -1300,7 +1361,7 @@ def command_download(args: argparse.Namespace) -> Dict[str, Any]:
     if args.output_dir is None:
         outputs = job.get("outputs")
         if not isinstance(outputs, list) or not outputs:
-            raise ToolError("no_outputs", "completed job has no output manifests")
+            raise ToolError("no_outputs", "已完成任务没有输出清单")
         return {
             "ok": True,
             "request_id": request_id,
@@ -1370,18 +1431,18 @@ def command_self_test(args: argparse.Namespace) -> Dict[str, Any]:
     return {
         "ok": True,
         "tests": [
-            "hashing",
-            "multipart encoding",
-            "safe filenames",
-            "request IDs",
-            "relay /v1 normalization",
-            "host-tool manifests",
+            "文件哈希",
+            "multipart 编码",
+            "安全文件名",
+            "request ID",
+            "中转 /v1 地址规范化",
+            "客户端工具清单",
         ],
     }
 
 
 def add_wait_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--wait", action="store_true", help="poll until the operation reaches its target status")
+    parser.add_argument("--wait", action="store_true", help="持续查询，直到任务达到目标状态")
     parser.add_argument("--poll-interval", type=float, default=2.0)
     parser.add_argument("--wait-timeout", type=float, default=1800.0)
 
@@ -1406,65 +1467,73 @@ def add_image_options(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Transfer relay image and attachment jobs through Lark/Feishu Drive."
+    parser = ChineseArgumentParser(
+        description="通过飞书云盘中转图片和附件任务。"
     )
-    parser.add_argument("--config", help="private JSON configuration path")
+    parser.add_argument("--config", help="私密 JSON 配置文件路径")
     parser.add_argument(
         "--allow-http",
         action="store_true",
-        help="allow an unencrypted relay URL after explicit user acceptance",
+        help="用户明确接受风险后，允许使用未加密的 HTTP 中转地址",
     )
-    commands = parser.add_subparsers(dest="command", required=True)
+    public_commands = (
+        "{capabilities,manifest,submit-generate,generate,submit-edit,edit,"
+        "submit-handoff,handoff,status,submit-job,download}"
+    )
+    commands = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar=public_commands,
+    )
 
-    capabilities = commands.add_parser("capabilities", help="show authenticated artifact capabilities")
+    capabilities = commands.add_parser("capabilities", help="查看当前中转服务支持的能力")
     capabilities.set_defaults(handler=command_capabilities)
 
     manifest = commands.add_parser(
         "manifest",
-        help="combine a host-uploaded file token with local size and SHA-256 metadata",
+        help="将客户端上传后返回的文件 token 与本地文件大小、SHA-256 合并成清单",
     )
-    manifest.add_argument("--file", required=True, help="local file that was uploaded by the host")
-    manifest.add_argument("--file-token", required=True, help="file token returned by the host Drive tool")
+    manifest.add_argument("--file", required=True, help="已由客户端上传的本地文件")
+    manifest.add_argument("--file-token", required=True, help="客户端云盘工具返回的文件 token")
     manifest.add_argument("--role", required=True, choices=("image", "mask", "attachment"))
     manifest.set_defaults(handler=command_manifest)
 
     generate = commands.add_parser(
         "submit-generate",
         aliases=["generate"],
-        help="submit a text-to-image job without requiring Lark credentials",
+        help="提交文生图任务，不需要飞书应用凭据",
     )
     add_image_options(generate)
     generate.set_defaults(handler=command_generate)
 
     submit_edit = commands.add_parser(
         "submit-edit",
-        help="submit host-uploaded image manifests without requiring Lark credentials",
+        help="提交客户端已上传的图片清单，不需要飞书应用凭据",
     )
     add_image_options(submit_edit)
     submit_edit.add_argument(
         "--input-manifest",
         action="append",
         required=True,
-        help="inline JSON or @path; repeat or provide a JSON array",
+        help="直接传 JSON 或 @文件路径；可以重复使用，也可以传 JSON 数组",
     )
     submit_edit.set_defaults(handler=command_submit_edit)
 
-    edit = commands.add_parser("edit", help="upload local images and create an asynchronous edit job")
+    edit = commands.add_parser("edit", help="上传本地图片并创建异步编辑任务")
     add_image_options(edit)
-    edit.add_argument("--image", action="append", required=True, help="ordered input image; repeat up to 16")
-    edit.add_argument("--mask", help="optional mask for the first image")
+    edit.add_argument("--image", action="append", required=True, help="按顺序输入图片，最多可重复 16 次")
+    edit.add_argument("--mask", help="可选，作用于第一张图片的蒙版")
     edit.set_defaults(handler=command_edit)
 
     submit_handoff = commands.add_parser(
         "submit-handoff",
-        help="submit host-uploaded attachment manifests without requiring Lark credentials",
+        help="提交客户端已上传的附件清单，不需要飞书应用凭据",
     )
     submit_handoff.add_argument(
         "--input-manifest",
         action="append",
         required=True,
-        help="inline JSON or @path; repeat or provide a JSON array",
+        help="直接传 JSON 或 @文件路径；可以重复使用，也可以传 JSON 数组",
     )
     submit_instructions = submit_handoff.add_mutually_exclusive_group()
     submit_instructions.add_argument("--instruction")
@@ -1473,8 +1542,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_wait_options(submit_handoff)
     submit_handoff.set_defaults(handler=command_submit_handoff)
 
-    handoff = commands.add_parser("handoff", help="upload local attachments for trusted processing")
-    handoff.add_argument("--file", action="append", required=True, help="local attachment; repeat up to 32")
+    handoff = commands.add_parser("handoff", help="上传本地附件，交给可信服务端处理")
+    handoff.add_argument("--file", action="append", required=True, help="本地附件，最多可重复 32 次")
     instructions = handoff.add_mutually_exclusive_group()
     instructions.add_argument("--instruction")
     instructions.add_argument("--instruction-file")
@@ -1482,17 +1551,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_wait_options(handoff)
     handoff.set_defaults(handler=command_handoff)
 
-    status = commands.add_parser("status", help="inspect or wait for an existing job")
+    status = commands.add_parser("status", help="查看或等待已有任务")
     status.add_argument("request_id")
     status_wait = status.add_mutually_exclusive_group()
-    status_wait.add_argument("--wait", action="store_true", help="stop at ready_for_processing or completed")
-    status_wait.add_argument("--wait-completed", action="store_true", help="continue through ready_for_processing")
+    status_wait.add_argument("--wait", action="store_true", help="到达 ready_for_processing 或 completed 时停止")
+    status_wait.add_argument("--wait-completed", action="store_true", help="经过 ready_for_processing 后继续等待完成")
     status.add_argument("--poll-interval", type=float, default=2.0)
     status.add_argument("--wait-timeout", type=float, default=1800.0)
     status.set_defaults(handler=command_status)
 
-    submit_job = commands.add_parser("submit-job", help="submit an exact relay job JSON manifest")
-    submit_job.add_argument("--job-manifest", required=True, help="inline JSON or @path")
+    submit_job = commands.add_parser("submit-job", help="提交完整的中转任务 JSON 清单")
+    submit_job.add_argument("--job-manifest", required=True, help="直接传 JSON 或 @文件路径")
     submit_job_wait = submit_job.add_mutually_exclusive_group()
     submit_job_wait.add_argument("--wait", action="store_true")
     submit_job_wait.add_argument("--wait-completed", action="store_true")
@@ -1500,17 +1569,17 @@ def build_parser() -> argparse.ArgumentParser:
     submit_job.add_argument("--wait-timeout", type=float, default=1800.0)
     submit_job.set_defaults(handler=command_submit_job)
 
-    download = commands.add_parser("download", help="download and verify a completed job's outputs")
+    download = commands.add_parser("download", help="下载并校验已完成任务的输出文件")
     download.add_argument("request_id")
     download.add_argument(
         "--output-dir",
-        help="script-direct fallback destination; omit to return output manifests for host tools",
+        help="脚本直传模式的下载目录；不填写则返回输出清单供客户端工具下载",
     )
     download.add_argument("--overwrite", action="store_true")
     add_wait_options(download)
     download.set_defaults(handler=command_download)
 
-    self_test = commands.add_parser("self-test", help=argparse.SUPPRESS)
+    self_test = commands.add_parser("self-test")
     self_test.set_defaults(handler=command_self_test)
     return parser
 
@@ -1518,11 +1587,11 @@ def build_parser() -> argparse.ArgumentParser:
 def validate_args(args: argparse.Namespace) -> None:
     for name in ("poll_interval", "wait_timeout"):
         if hasattr(args, name) and getattr(args, name) <= 0:
-            raise ToolError("invalid_arguments", "--%s must be positive" % name.replace("_", "-"))
+            raise ToolError("invalid_arguments", "--%s 必须大于 0" % name.replace("_", "-"))
     if hasattr(args, "n") and not 1 <= args.n <= 10:
-        raise ToolError("invalid_arguments", "--n must be between 1 and 10")
+        raise ToolError("invalid_arguments", "--n 必须在 1 到 10 之间")
     if hasattr(args, "compression") and args.compression is not None and not 0 <= args.compression <= 100:
-        raise ToolError("invalid_arguments", "--compression must be between 0 and 100")
+        raise ToolError("invalid_arguments", "--compression 必须在 0 到 100 之间")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1548,7 +1617,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "ok": False,
                 "error": {
                     "code": "interrupted",
-                    "message": "operation was interrupted; reuse the same request ID when known",
+                    "message": "操作已中断；如果知道 request ID，请使用同一个 ID 重试",
                     "retryable": True,
                 },
             },
@@ -1561,7 +1630,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "ok": False,
                 "error": {
                     "code": "internal_error",
-                    "message": "unexpected local client error",
+                    "message": "本地客户端发生意外错误",
                     "retryable": False,
                 },
             },
