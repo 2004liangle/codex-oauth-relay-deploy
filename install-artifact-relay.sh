@@ -15,6 +15,7 @@ LOCAL_CLI="/usr/local/sbin/codex-artifact-relay-local"
 NGINX_SITE="/etc/nginx/sites-available/codex-relay"
 NGINX_SNIPPET="/etc/nginx/snippets/codex-artifact-relay-locations.conf"
 INTERNAL_PORT="${ARTIFACT_RELAY_PORT:-18318}"
+WORKER_COUNT="${ARTIFACT_RELAY_WORKERS:-2}"
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -69,6 +70,8 @@ LARK_IDENTITY="${FEISHU_LARK_IDENTITY:-bot}"
 [[ "$RUN_HOME" =~ ^[A-Za-z0-9_./-]+$ ]] || die "The lark-cli home path contains unsupported characters."
 [[ "$INTERNAL_PORT" =~ ^[0-9]+$ ]] || die "ARTIFACT_RELAY_PORT must be numeric."
 (( INTERNAL_PORT >= 1 && INTERNAL_PORT <= 65535 )) || die "ARTIFACT_RELAY_PORT is out of range."
+[[ "$WORKER_COUNT" =~ ^[0-9]+$ ]] || die "ARTIFACT_RELAY_WORKERS must be numeric."
+(( WORKER_COUNT >= 1 && WORKER_COUNT <= 4 )) || die "ARTIFACT_RELAY_WORKERS must be between 1 and 4."
 
 if [[ -r /root/codex-relay-credentials.txt ]]; then
   API_KEY="$(sed -n 's/^API_KEY=//p' /root/codex-relay-credentials.txt | head -n 1)"
@@ -125,7 +128,7 @@ ARTIFACT_RELAY_UPSTREAM_BASE_URL=http://127.0.0.1:18317/v1
 ARTIFACT_RELAY_STATE_DIR=$STATE_DIR
 ARTIFACT_RELAY_HOST=127.0.0.1
 ARTIFACT_RELAY_PORT=$INTERNAL_PORT
-ARTIFACT_RELAY_WORKERS=1
+ARTIFACT_RELAY_WORKERS=$WORKER_COUNT
 ARTIFACT_RELAY_LARK_CLI=$LARK_CLI
 ARTIFACT_RELAY_LARK_HOME=$RUN_HOME
 ARTIFACT_RELAY_LARK_IDENTITY=$LARK_IDENTITY

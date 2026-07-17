@@ -112,7 +112,7 @@ class Config:
     prlimit_cli: str = "/usr/bin/prlimit"
     host: str = "127.0.0.1"
     port: int = 18318
-    worker_count: int = 1
+    worker_count: int = 2
     max_request_bytes: int = 1024 * 1024
     max_input_bytes: int = 64 * 1024 * 1024
     max_upstream_response_bytes: int = 128 * 1024 * 1024
@@ -147,7 +147,7 @@ class Config:
             output_target_token=output_token,
             host=os.environ.get("ARTIFACT_RELAY_HOST", "127.0.0.1"),
             port=env_int("ARTIFACT_RELAY_PORT", 18318, 1, 65535),
-            worker_count=env_int("ARTIFACT_RELAY_WORKERS", 1, 1, 4),
+            worker_count=env_int("ARTIFACT_RELAY_WORKERS", 2, 1, 4),
             max_request_bytes=env_int(
                 "ARTIFACT_RELAY_MAX_REQUEST_BYTES", 1024 * 1024, 1024, 8 * 1024 * 1024
             ),

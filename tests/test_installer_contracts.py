@@ -8,14 +8,15 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = (ROOT / "install-codex-relay.sh").read_text()
 BOOTSTRAP = (ROOT / "install.sh").read_text()
 IMAGES_INSTALLER = (ROOT / "install-relay-images-skill.sh").read_text()
+ARTIFACT_INSTALLER = (ROOT / "install-artifact-relay.sh").read_text()
 UI_BUILDER = (ROOT / "usage-ui" / "build-plain-zh.sh").read_text()
 
 
 class UsageDashboardInstallerTests(unittest.TestCase):
     def test_release_entry_points_are_aligned(self):
-        self.assertIn('DEPLOY_RELEASE_VERSION="1.3.1"', INSTALLER)
-        self.assertIn('/releases/download/v1.3.1/install-codex-relay.sh', BOOTSTRAP)
-        self.assertIn('VERSION="v1.3.1"', IMAGES_INSTALLER)
+        self.assertIn('DEPLOY_RELEASE_VERSION="1.3.2"', INSTALLER)
+        self.assertIn('/releases/download/v1.3.2/install-codex-relay.sh', BOOTSTRAP)
+        self.assertIn('VERSION="v1.3.2"', IMAGES_INSTALLER)
 
     def test_plain_chinese_ui_is_versioned_and_hash_pinned(self):
         version = re.search(r'^USAGE_UI_VERSION="([^"]+)"$', INSTALLER, re.MULTILINE)
@@ -26,6 +27,12 @@ class UsageDashboardInstallerTests(unittest.TestCase):
         self.assertIsNotNone(digest)
         self.assertRegex(digest.group(1), r"^[0-9a-f]{64}$")
         self.assertIn("printf '%s  %s\\n' \"$USAGE_UI_SHA256\"", INSTALLER)
+
+    def test_artifact_relay_defaults_to_two_bounded_workers(self):
+        self.assertIn('WORKER_COUNT="${ARTIFACT_RELAY_WORKERS:-2}"', ARTIFACT_INSTALLER)
+        self.assertIn("WORKER_COUNT >= 1 && WORKER_COUNT <= 4", ARTIFACT_INSTALLER)
+        self.assertIn("ARTIFACT_RELAY_WORKERS=$WORKER_COUNT", ARTIFACT_INSTALLER)
+        self.assertNotIn("ARTIFACT_RELAY_WORKERS=1", ARTIFACT_INSTALLER)
 
     def test_static_ui_and_api_routes_are_separate(self):
         api = INSTALLER.index("location ^~ /usage/api/")
