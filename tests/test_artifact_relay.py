@@ -129,6 +129,9 @@ class ArtifactRelayTests(unittest.TestCase):
             "inputs": [],
         }
 
+    def test_default_worker_count_is_two(self):
+        self.assertEqual(self.config.worker_count, 2)
+
     def test_capabilities_exposes_only_input_target_and_manual_retention(self):
         service = self.service(start_workers=False)
         value = service.capabilities()

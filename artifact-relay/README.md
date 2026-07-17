@@ -51,12 +51,14 @@ sudo env \
   FEISHU_INPUT_FOLDER_TOKEN='<input-folder-token>' \
   FEISHU_OUTPUT_FOLDER_TOKEN='<output-folder-token>' \
   FEISHU_LARK_USER=ubuntu \
+  ARTIFACT_RELAY_WORKERS=2 \
   bash install-artifact-relay.sh
 ```
 
 The folders must be different. The capabilities endpoint reveals only the
 input folder so clients can upload source files automatically. The output
-folder remains server-side configuration.
+folder remains server-side configuration. `ARTIFACT_RELAY_WORKERS` defaults to
+`2` and accepts values from `1` through `4`.
 
 ## Local Handoff
 
