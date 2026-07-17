@@ -1,39 +1,39 @@
-# Relay artifact API contract
+# 中转文件接口说明
 
-Read this reference when calling the protocol without the bundled script, diagnosing failures, or selecting image options.
+在不使用随附脚本直接调用协议、排查故障或选择图片参数时，请阅读本参考说明。
 
-## Configuration
+## 配置
 
-The script accepts private JSON configuration through `--config`, `RELAY_ARTIFACTS_CONFIG`, or `assets/config.json`. Host-tools mode needs only relay settings. Script-direct Lark transfer additionally needs the Lark settings. These environment variables override JSON values:
+脚本可通过 `--config`、`RELAY_ARTIFACTS_CONFIG` 或 `assets/config.json` 读取私有 JSON 配置。客户端工具模式只需要中转服务配置；脚本直连 Lark/飞书传输时还需要 Lark/飞书配置。以下环境变量会覆盖 JSON 中的值：
 
-| Environment variable | Meaning |
+| 环境变量 | 含义 |
 | --- | --- |
-| `RELAY_ARTIFACTS_BASE_URL` | Relay origin or OpenAI-style URL ending in `/v1` |
-| `RELAY_ARTIFACTS_API_KEY` | Relay Bearer key |
-| `LARK_APP_ID` | Optional fallback Lark/Feishu custom app ID |
-| `LARK_APP_SECRET` | Optional fallback Lark/Feishu custom app secret |
-| `LARK_API_BASE_URL` | Usually `https://open.feishu.cn`; use `https://open.larksuite.com` for Lark |
-| `LARK_INPUT_FOLDER_TOKEN` | Optional override for capability discovery |
+| `RELAY_ARTIFACTS_BASE_URL` | 中转服务源地址，或以 `/v1` 结尾的 OpenAI 风格地址 |
+| `RELAY_ARTIFACTS_API_KEY` | 中转服务采用 `Bearer` 认证时使用的密钥 |
+| `LARK_APP_ID` | 备用的 Lark/飞书自建应用 ID，可不填 |
+| `LARK_APP_SECRET` | 备用的 Lark/飞书自建应用密钥，可不填 |
+| `LARK_API_BASE_URL` | 通常为 `https://open.feishu.cn`；使用 Lark 时填写 `https://open.larksuite.com` |
+| `LARK_INPUT_FOLDER_TOKEN` | 可选，用于覆盖能力发现返回的目标文件夹 |
 
-Do not publish `assets/config.json`. The distributed package contains only `config.example.json` placeholders.
+不要公开 `assets/config.json`。发布包中只包含带占位值的 `config.example.json`。
 
-The relay base may be either `https://relay.example.com` or `https://relay.example.com/v1`; the client normalizes both to the same artifact endpoints and rejects unrelated path prefixes.
+中转服务地址可以是 `https://relay.example.com`，也可以是 `https://relay.example.com/v1`。客户端会将两者转换为相同的文件接口地址，并拒绝无关的路径前缀。
 
-In preferred host-tools mode, use the client's authenticated Drive connector to transfer file bytes and use the script only for relay capabilities, local hashing, submission, polling, and output manifests. After a host upload, `manifest --file LOCAL --file-token TOKEN --role ROLE` builds the verified input manifest. `submit-edit` and `submit-handoff` accept repeated `--input-manifest` values as inline JSON or `@path`. `download REQUEST_ID` returns output manifests; `--output-dir` opts into script-direct Lark download.
+首选客户端工具模式：使用客户端已经认证的云盘连接器传输文件内容，脚本只负责查询中转能力、计算本地哈希、提交任务、轮询状态和获取输出清单。客户端工具上传完成后，使用 `manifest --file LOCAL --file-token TOKEN --role ROLE` 生成经过校验的输入清单。`submit-edit` 和 `submit-handoff` 可通过重复传入 `--input-manifest` 接收内联 JSON 或 `@path`。`download REQUEST_ID` 返回输出清单；传入 `--output-dir` 才会启用脚本直连 Lark/飞书下载。
 
-## Relay endpoints
+## 中转服务端点
 
-All requests use `Authorization: Bearer <relay-key>`.
+所有请求都使用 `Authorization: Bearer <relay-key>`。
 
-| Method and path | Purpose |
+| 方法和路径 | 用途 |
 | --- | --- |
-| `GET /v1/artifact-capabilities` | Discover protocol, operations, limits, retention, and input folder |
-| `POST /v1/artifact-jobs` | Idempotently submit a job manifest |
-| `GET /v1/artifact-jobs/{request_id}` | Poll an existing job |
+| `GET /v1/artifact-capabilities` | 查询协议、操作、限制、保留策略和输入文件夹 |
+| `POST /v1/artifact-jobs` | 以幂等方式提交任务清单 |
+| `GET /v1/artifact-jobs/{request_id}` | 轮询已有任务 |
 
-Request IDs contain 8-128 ASCII letters, digits, `.`, `_`, or `-`, starting with a letter or digit. Repeating an identical ID and payload is idempotent. Reusing an ID with a different payload returns `409`.
+请求 ID 长度为 8-128 个 ASCII 字符，只能包含字母、数字、`.`、`_` 或 `-`，且必须以字母或数字开头。使用相同 ID 重复提交完全相同的载荷是幂等操作；使用同一 ID 提交不同载荷会返回 `409`。
 
-Submit JSON:
+提交以下 JSON：
 
 ```json
 {
@@ -41,7 +41,7 @@ Submit JSON:
   "operation": "image.edit",
   "parameters": {
     "model": "gpt-image-2",
-    "prompt": "Place Image 2 into Image 1",
+    "prompt": "将图片 2 放入图片 1",
     "quality": "high",
     "size": "1536x1024",
     "output_format": "webp"
@@ -59,41 +59,41 @@ Submit JSON:
 }
 ```
 
-Supported operations:
+支持以下操作：
 
-- `image.generate`: no inputs; requires `parameters.prompt`.
-- `image.edit`: 1-16 ordered `role=image` inputs and at most one `role=mask`; requires `parameters.prompt`.
-- `artifact.handoff`: 1-32 `role=attachment` inputs; accepts only optional `parameters.instruction`.
+- `image.generate`：不接收输入文件；必须提供 `parameters.prompt`。
+- `image.edit`：按顺序接收 1-16 个 `role=image` 输入，最多再接收一个 `role=mask` 输入；必须提供 `parameters.prompt`。
+- `artifact.handoff`：接收 1-32 个 `role=attachment` 输入；只接受可选的 `parameters.instruction` 参数。
 
-Image parameters supported by the relay are `model`, `prompt`, `quality`, `size`, `n`, `output_format`, `output_compression`, `background`, `moderation`, `user`, and local `output_name`. The bundled client exposes the commonly used subset.
+中转服务支持的图片参数包括 `model`、`prompt`、`quality`、`size`、`n`、`output_format`、`output_compression`、`background`、`moderation`、`user`，以及本地使用的 `output_name`。随附客户端开放了其中常用的参数。
 
-Statuses:
+状态值：
 
-- `queued`, `downloading`, `processing`, `uploading`: active.
-- `ready_for_processing`: handoff inputs arrived and passed integrity checks.
-- `completed`: output manifests are available.
-- `failed`: terminal; inspect structured `error.code`, `error.message`, and `error.retryable`.
+- `queued`、`downloading`、`processing`、`uploading`：任务仍在运行。
+- `ready_for_processing`：中转附件已到达并通过完整性校验，可以开始处理。
+- `completed`：输出清单已可获取。
+- `failed`：任务已终止；检查结构化字段 `error.code`、`error.message` 和 `error.retryable`。
 
-Each input and output manifest contains `file_token`, safe base `name`, `mime_type`, positive `size_bytes`, and lowercase SHA-256. Image edit manifests also contain `role`.
+每个输入和输出清单都包含 `file_token`、安全的基础文件名 `name`、`mime_type`、正数 `size_bytes` 和小写 SHA-256。图片编辑清单还包含 `role`。
 
-## Lark/Feishu transfer
+## Lark/飞书文件传输
 
-Obtain an app token with `POST /open-apis/auth/v3/tenant_access_token/internal` and JSON `app_id` plus `app_secret`.
+调用 `POST /open-apis/auth/v3/tenant_access_token/internal`，并在 JSON 中提供 `app_id` 和 `app_secret`，以获取应用访问令牌。
 
-For non-empty files up to 20 MiB, upload with multipart `POST /open-apis/drive/v1/files/upload_all`. Fields are `file_name`, `parent_type=explorer`, `parent_node`, `size`, optional Adler-32 `checksum`, and `file`.
+对于不超过 20 MiB 的非空文件，使用 multipart 请求调用 `POST /open-apis/drive/v1/files/upload_all`。字段包括 `file_name`、`parent_type=explorer`、`parent_node`、`size`、可选的 Adler-32 `checksum`，以及 `file`。
 
-For larger files:
+对于更大的文件：
 
-1. `POST /open-apis/drive/v1/files/upload_prepare` with JSON `file_name`, `parent_type=explorer`, `parent_node`, and `size`.
-2. Read `upload_id`, `block_size`, and `block_num`.
-3. Sequentially call multipart `POST /open-apis/drive/v1/files/upload_part` for every block. Send `upload_id`, zero-based `seq`, exact `size`, Adler-32 `checksum`, and `file`. Do not upload blocks concurrently.
-4. `POST /open-apis/drive/v1/files/upload_finish` with JSON `upload_id` and `block_num`; read `file_token`.
+1. 使用 JSON 字段 `file_name`、`parent_type=explorer`、`parent_node` 和 `size` 调用 `POST /open-apis/drive/v1/files/upload_prepare`。
+2. 读取 `upload_id`、`block_size` 和 `block_num`。
+3. 按顺序对每个分片调用 multipart 接口 `POST /open-apis/drive/v1/files/upload_part`。传入 `upload_id`、从零开始的 `seq`、精确的 `size`、Adler-32 `checksum` 和 `file`。不要并发上传分片。
+4. 使用 JSON 字段 `upload_id` 和 `block_num` 调用 `POST /open-apis/drive/v1/files/upload_finish`，然后读取 `file_token`。
 
-Download with `GET /open-apis/drive/v1/files/{file_token}/download`. Resume a partial file with `Range: bytes=<current-size>-<expected-size-minus-one>`. A resumed response must be `206`; if the server returns `200`, restart the local partial file. Verify exact size and SHA-256 before atomically replacing the destination.
+使用 `GET /open-apis/drive/v1/files/{file_token}/download` 下载文件。通过 `Range: bytes=<current-size>-<expected-size-minus-one>` 续传部分文件。续传响应必须为 `206`；如果服务端返回 `200`，应从头写入本地临时文件。只有在核对精确字节数和 SHA-256 后，才能以原子方式替换目标文件。
 
-## Reliability and retention
+## 可靠性与保留策略
 
-- Relay POST retries must reuse the same request ID.
-- Keep `.part` files after transient download failures so a later command can resume.
-- A lost response from the single-call Lark upload may have created a duplicate file; the script does not blindly retry that call.
-- Lark files have manual retention. Never add time-based deletion or delete artifacts without an explicit user request.
+- 重试中转服务的 POST 请求时，必须复用同一个请求 ID。
+- 临时下载失败后保留 `.part` 文件，以便后续命令断点续传。
+- Lark/飞书单次上传的成功响应如果丢失，可能已经产生重复文件；脚本不会盲目重试该调用。
+- Lark/飞书文件采用手动保留策略。不得增加定时删除，也不得在用户没有明确要求时删除附件。

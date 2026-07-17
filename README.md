@@ -70,7 +70,7 @@ curl -sS "$API_BASE_URL/images/generations" \
 
 ## 通用 Relay Artifacts Skill
 
-客户端不需要运行系统安装命令。下载 [`relay-artifacts.zip`](https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/relay-artifacts.zip)，再用客户端的“上传技能”或“导入 Skill”功能选择这个 ZIP 即可。
+客户端不需要运行系统安装命令。下载 [`relay-artifacts.zip`](https://github.com/2004liangle/codex-oauth-relay-deploy/releases/latest/download/relay-artifacts.zip)，再用客户端的“上传技能”或“导入 Skill”功能选择这个 ZIP 即可。包内的使用说明、命令帮助和常见错误提示均为简体中文。
 
 这个客户端包依赖服务器已经启用飞书附件 Sidecar；服务端安装和目录配置见 [`artifact-relay/README.md`](artifact-relay/README.md)。
 

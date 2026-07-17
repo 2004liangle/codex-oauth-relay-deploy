@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 umask 077
 
-VERSION="v1.3.0"
+VERSION="v1.3.1"
 REPOSITORY="2004liangle/codex-oauth-relay-deploy"
 RAW_BASE="https://raw.githubusercontent.com/$REPOSITORY/$VERSION/skills/relay-images"
 TARGET="${CODEX_HOME:-$HOME/.codex}/skills/relay-images"

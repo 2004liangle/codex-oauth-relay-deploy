@@ -17,6 +17,25 @@ SPEC.loader.exec_module(relay_artifacts)
 
 
 class HostToolsContractTests(unittest.TestCase):
+    def test_skill_docs_and_command_help_are_simplified_chinese(self):
+        skill_text = (ROOT / "skills" / "relay-artifacts" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        reference_text = (
+            ROOT / "skills" / "relay-artifacts" / "references" / "api-contract.md"
+        ).read_text(encoding="utf-8")
+        help_text = relay_artifacts.build_parser().format_help()
+
+        self.assertIn("# 飞书中转图片与附件", skill_text)
+        self.assertIn("description: 通过已配置的", skill_text)
+        self.assertIn("# 中转文件接口说明", reference_text)
+        self.assertIn("通过飞书云盘中转图片和附件任务", help_text)
+        self.assertIn("用法:", help_text)
+        self.assertIn("选项", help_text)
+        self.assertNotIn("# Relay Artifacts", skill_text)
+        self.assertNotIn("usage:", help_text)
+        self.assertNotIn("self-test", help_text)
+
     def test_manifest_output_can_be_submitted_without_manual_json_rewriting(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "report.txt"
