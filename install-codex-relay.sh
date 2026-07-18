@@ -7,18 +7,20 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 CLIPROXY_VERSION="7.2.80"
 KEEPER_VERSION="1.13.2"
 MANAGEMENT_VERSION="1.18.3"
-DEPLOY_RELEASE_VERSION="1.3.2"
-USAGE_UI_VERSION="1.13.2-plain-zh.1"
-USAGE_UI_SHA256="ce7468c31f955956300d3b668909ce84a98864ed804aeff6da3db2c5a974b4aa"
+DEPLOY_RELEASE_VERSION="1.4.0"
+USAGE_UI_VERSION="1.13.2-plain-zh.2"
+USAGE_UI_SHA256="74e32e3aae046b1ab5659b1d509df5669968b9f0ab285dcb1029f16a9853ae2d"
+NETWORK_MONITOR_SHA256="5fa47811ddbec9ef8be0b4b93844c635c4ff9ecb83053fdd3d2341c559fc1d14"
 USAGE_UI_ROOT="/opt/codex-relay-usage-ui"
 DEFAULT_PORT="8317"
 DEFAULT_TZ="Asia/Shanghai"
-INTERNAL_PORTS=(18080 18081 18317 18318)
+INTERNAL_PORTS=(18080 18081 18082 18317 18318)
 INSTALL_STATE_DIR="/etc/codex-relay-installer"
 OWNER_MARKER="$INSTALL_STATE_DIR/managed"
 COMPLETE_MARKER="$INSTALL_STATE_DIR/complete"
 PARAMS_FILE="$INSTALL_STATE_DIR/settings"
 PORTS_CHECKED_MARKER="$INSTALL_STATE_DIR/ports-checked"
+NETWORK_MONITOR_PORT_CHECKED_MARKER="$INSTALL_STATE_DIR/network-monitor-port-checked"
 
 log() {
   printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
@@ -60,6 +62,15 @@ Optional environment variables:
   PUBLIC_HOST       Public IPv4 address or DNS name
   PUBLIC_PORT       Public Nginx port (default: 8317)
   TZ                Dashboard timezone (default: Asia/Shanghai)
+  NETWORK_INTERFACE Network interface to monitor (default: IPv4 default route)
+  TRAFFIC_PACKAGE_TOTAL_GB
+                    Purchased traffic package in decimal GB (default: 0, disabled)
+  TRAFFIC_PACKAGE_START_AT / TRAFFIC_PACKAGE_END_AT
+                    Optional package cycle boundaries in RFC 3339 format
+  TRAFFIC_PACKAGE_TX_OFFSET_BYTES
+                    Provider-billed outbound bytes used before monitoring began
+  PURCHASED_BANDWIDTH_MBPS
+                    Optional purchased bandwidth in Mbps (default: 0, disabled)
   SKIP_OAUTH=1      Install services without starting device authentication
   SKIP_INFERENCE_TEST=1
                     Skip the final real model request
@@ -142,6 +153,13 @@ fi
 SAVED_PUBLIC_HOST=""
 SAVED_PUBLIC_PORT=""
 SAVED_TIMEZONE=""
+SAVED_NETWORK_INTERFACE=""
+SAVED_TRAFFIC_PACKAGE_TOTAL_GB=""
+SAVED_TRAFFIC_PACKAGE_START_AT=""
+SAVED_TRAFFIC_PACKAGE_END_AT=""
+SAVED_TRAFFIC_PACKAGE_TX_OFFSET_BYTES=""
+SAVED_PURCHASED_BANDWIDTH_MBPS=""
+SAVED_NETWORK_MONITOR_INTERNAL_TOKEN=""
 if [[ "$REPAIR_MODE" == "1" ]]; then
   SETTINGS_SOURCE=""
   if [[ -r "$PARAMS_FILE" ]]; then
@@ -164,20 +182,33 @@ if [[ "$REPAIR_MODE" == "1" ]]; then
   PUBLIC_HOST="${PUBLIC_HOST:-$SAVED_PUBLIC_HOST}"
   PUBLIC_PORT="${PUBLIC_PORT:-$SAVED_PUBLIC_PORT}"
   TZ="${TZ:-$SAVED_TIMEZONE}"
+  if [[ -r /etc/codex-network-monitor/env ]]; then
+    SAVED_NETWORK_INTERFACE="$(sed -n 's/^NETWORK_INTERFACE=//p' /etc/codex-network-monitor/env | head -n 1)"
+    SAVED_TRAFFIC_PACKAGE_TOTAL_GB="$(sed -n 's/^TRAFFIC_PACKAGE_TOTAL_GB=//p' /etc/codex-network-monitor/env | head -n 1)"
+    SAVED_TRAFFIC_PACKAGE_START_AT="$(sed -n 's/^TRAFFIC_PACKAGE_START_AT=//p' /etc/codex-network-monitor/env | head -n 1)"
+    SAVED_TRAFFIC_PACKAGE_END_AT="$(sed -n 's/^TRAFFIC_PACKAGE_END_AT=//p' /etc/codex-network-monitor/env | head -n 1)"
+    SAVED_TRAFFIC_PACKAGE_TX_OFFSET_BYTES="$(sed -n 's/^TRAFFIC_PACKAGE_TX_OFFSET_BYTES=//p' /etc/codex-network-monitor/env | head -n 1)"
+    SAVED_PURCHASED_BANDWIDTH_MBPS="$(sed -n 's/^PURCHASED_BANDWIDTH_MBPS=//p' /etc/codex-network-monitor/env | head -n 1)"
+    SAVED_NETWORK_MONITOR_INTERNAL_TOKEN="$(sed -n 's/^NETWORK_MONITOR_INTERNAL_TOKEN=//p' /etc/codex-network-monitor/env | head -n 1)"
+  fi
 fi
 
 if [[ "$REPAIR_MODE" == "0" ]]; then
   for target in \
     /etc/systemd/system/cliproxyapi.service \
     /etc/systemd/system/cpa-usage-keeper.service \
+    /etc/systemd/system/codex-network-monitor.service \
     /etc/cpa-usage-keeper/env \
+    /etc/codex-network-monitor \
     /etc/nginx/sites-available/codex-relay \
     /etc/nginx/sites-enabled/codex-relay \
     /opt/cliproxyapi \
     /opt/cpa-usage-keeper \
+    /opt/codex-network-monitor \
     "$USAGE_UI_ROOT" \
     /var/lib/cliproxyapi \
     /var/lib/cpa-usage-keeper \
+    /var/lib/codex-network-monitor \
     /root/codex-relay-credentials.txt; do
     [[ ! -e "$target" ]] || die "Existing unmanaged file detected: $target"
   done
@@ -259,10 +290,60 @@ fi
 log "Installing operating-system packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl jq openssl tar nginx squid iproute2 sqlite3
+apt-get install -y ca-certificates curl jq openssl tar nginx squid iproute2 python3 sqlite3
 
 [[ "$TIMEZONE" =~ ^[A-Za-z0-9_+./-]+$ && -e "/usr/share/zoneinfo/$TIMEZONE" ]] || \
   die "TZ does not name an installed timezone: $TIMEZONE"
+
+if [[ ! -v NETWORK_INTERFACE || -z "$NETWORK_INTERFACE" ]]; then
+  NETWORK_INTERFACE="${SAVED_NETWORK_INTERFACE:-$(ip -4 route show default 2>/dev/null | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }')}"
+fi
+[[ "$NETWORK_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || \
+  die "NETWORK_INTERFACE must be a valid Linux network interface name."
+[[ "$NETWORK_INTERFACE" != "lo" && -d "/sys/class/net/$NETWORK_INTERFACE" ]] || \
+  die "NETWORK_INTERFACE does not name an available non-loopback interface: $NETWORK_INTERFACE"
+
+if [[ ! -v TRAFFIC_PACKAGE_TOTAL_GB ]]; then
+  TRAFFIC_PACKAGE_TOTAL_GB="${SAVED_TRAFFIC_PACKAGE_TOTAL_GB:-0}"
+fi
+if [[ ! -v TRAFFIC_PACKAGE_START_AT ]]; then
+  TRAFFIC_PACKAGE_START_AT="$SAVED_TRAFFIC_PACKAGE_START_AT"
+fi
+if [[ ! -v TRAFFIC_PACKAGE_END_AT ]]; then
+  TRAFFIC_PACKAGE_END_AT="$SAVED_TRAFFIC_PACKAGE_END_AT"
+fi
+if [[ ! -v TRAFFIC_PACKAGE_TX_OFFSET_BYTES ]]; then
+  TRAFFIC_PACKAGE_TX_OFFSET_BYTES="${SAVED_TRAFFIC_PACKAGE_TX_OFFSET_BYTES:-0}"
+fi
+if [[ ! -v PURCHASED_BANDWIDTH_MBPS ]]; then
+  PURCHASED_BANDWIDTH_MBPS="${SAVED_PURCHASED_BANDWIDTH_MBPS:-0}"
+fi
+
+[[ "$TRAFFIC_PACKAGE_TOTAL_GB" =~ ^(0|[0-9]+([.][0-9]+)?)$ ]] || \
+  die "TRAFFIC_PACKAGE_TOTAL_GB must be a non-negative decimal number."
+[[ "$TRAFFIC_PACKAGE_TX_OFFSET_BYTES" =~ ^[0-9]+$ ]] || \
+  die "TRAFFIC_PACKAGE_TX_OFFSET_BYTES must be a non-negative integer."
+[[ "$PURCHASED_BANDWIDTH_MBPS" =~ ^(0|[0-9]+([.][0-9]+)?)$ ]] || \
+  die "PURCHASED_BANDWIDTH_MBPS must be a non-negative decimal number."
+for package_date_name in TRAFFIC_PACKAGE_START_AT TRAFFIC_PACKAGE_END_AT; do
+  package_date_value="${!package_date_name}"
+  if [[ -n "$package_date_value" && \
+        ! "$package_date_value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$ ]]; then
+    die "$package_date_name must be empty or use RFC 3339 format."
+  fi
+  if [[ -n "$package_date_value" ]] && ! date -d "$package_date_value" +%s >/dev/null 2>&1; then
+    die "$package_date_name is not a valid date."
+  fi
+done
+if [[ -n "$TRAFFIC_PACKAGE_START_AT" && -n "$TRAFFIC_PACKAGE_END_AT" ]] && \
+   (( $(date -d "$TRAFFIC_PACKAGE_START_AT" +%s) >= $(date -d "$TRAFFIC_PACKAGE_END_AT" +%s) )); then
+  die "TRAFFIC_PACKAGE_END_AT must be later than TRAFFIC_PACKAGE_START_AT."
+fi
+
+NETWORK_MONITOR_INTERNAL_TOKEN="$SAVED_NETWORK_MONITOR_INTERNAL_TOKEN"
+if [[ ! "$NETWORK_MONITOR_INTERNAL_TOKEN" =~ ^[0-9a-f]{64}$ ]]; then
+  NETWORK_MONITOR_INTERNAL_TOKEN="$(openssl rand -hex 32)"
+fi
 
 if [[ "$REPAIR_MODE" == "1" && -r /root/codex-relay-credentials.txt ]]; then
   API_KEY="$(sed -n 's/^API_KEY=//p' /root/codex-relay-credentials.txt | head -n 1)"
@@ -286,6 +367,7 @@ fi
 
 FULL_PORT_CHECK=0
 PUBLIC_PORT_CHANGED=0
+NETWORK_MONITOR_PORT_CHECK=0
 if [[ "$REPAIR_MODE" == "0" ]]; then
   FULL_PORT_CHECK=1
 elif [[ -n "$SAVED_PUBLIC_PORT" && "$PUBLIC_PORT" != "$SAVED_PUBLIC_PORT" ]]; then
@@ -293,11 +375,20 @@ elif [[ -n "$SAVED_PUBLIC_PORT" && "$PUBLIC_PORT" != "$SAVED_PUBLIC_PORT" ]]; th
 elif [[ "$PREVIOUSLY_COMPLETE" != "1" && ! -f "$PORTS_CHECKED_MARKER" ]]; then
   FULL_PORT_CHECK=1
 fi
+if [[ "$FULL_PORT_CHECK" != "1" && ! -f "$NETWORK_MONITOR_PORT_CHECKED_MARKER" ]]; then
+  NETWORK_MONITOR_PORT_CHECK=1
+fi
 
-if [[ "$FULL_PORT_CHECK" == "1" || "$PUBLIC_PORT_CHANGED" == "1" ]]; then
-  PORTS_TO_CHECK=("$PUBLIC_PORT")
+if [[ "$FULL_PORT_CHECK" == "1" || "$PUBLIC_PORT_CHANGED" == "1" || \
+      "$NETWORK_MONITOR_PORT_CHECK" == "1" ]]; then
+  PORTS_TO_CHECK=()
+  if [[ "$FULL_PORT_CHECK" == "1" || "$PUBLIC_PORT_CHANGED" == "1" ]]; then
+    PORTS_TO_CHECK+=("$PUBLIC_PORT")
+  fi
   if [[ "$FULL_PORT_CHECK" == "1" ]]; then
     PORTS_TO_CHECK+=("${INTERNAL_PORTS[@]}")
+  elif [[ "$NETWORK_MONITOR_PORT_CHECK" == "1" ]]; then
+    PORTS_TO_CHECK+=(18082)
   fi
   for port in "${PORTS_TO_CHECK[@]}"; do
     if ss -H -ltn | awk -v port="$port" '
@@ -308,6 +399,9 @@ if [[ "$FULL_PORT_CHECK" == "1" || "$PUBLIC_PORT_CHANGED" == "1" ]]; then
     fi
   done
   touch "$PORTS_CHECKED_MARKER"
+  if [[ "$FULL_PORT_CHECK" == "1" || "$NETWORK_MONITOR_PORT_CHECK" == "1" ]]; then
+    touch "$NETWORK_MONITOR_PORT_CHECKED_MARKER"
+  fi
 elif [[ "$PREVIOUSLY_COMPLETE" == "1" ]]; then
   touch "$PORTS_CHECKED_MARKER"
 fi
@@ -351,13 +445,24 @@ else
      "$cpausage_shell" == "/usr/sbin/nologin" && "$(id -gn cpausage)" == "cpausage" ]] || \
     die "Existing cpausage account does not match the required restricted service account."
 fi
+if ! id codexnet >/dev/null 2>&1; then
+  useradd --system --user-group --home-dir /var/lib/codex-network-monitor \
+    --shell /usr/sbin/nologin codexnet
+else
+  IFS=: read -r _ _ codexnet_uid _ _ codexnet_home codexnet_shell < <(getent passwd codexnet)
+  [[ "$codexnet_uid" -lt 1000 && "$codexnet_home" == "/var/lib/codex-network-monitor" && \
+     "$codexnet_shell" == "/usr/sbin/nologin" && "$(id -gn codexnet)" == "codexnet" ]] || \
+    die "Existing codexnet account does not match the required restricted service account."
+fi
 
 install -d -o root -g root -m 0755 \
   /opt/cliproxyapi \
   /opt/cpa-usage-keeper \
+  /opt/codex-network-monitor \
   "$USAGE_UI_ROOT"
 install -d -o root -g cliproxyapi -m 0750 /etc/cliproxyapi
 install -d -o root -g cpausage -m 0750 /etc/cpa-usage-keeper
+install -d -o root -g codexnet -m 0750 /etc/codex-network-monitor
 install -d -o cliproxyapi -g cliproxyapi -m 0700 \
   /var/lib/cliproxyapi \
   /var/lib/cliproxyapi/auth \
@@ -365,11 +470,13 @@ install -d -o cliproxyapi -g cliproxyapi -m 0700 \
   /var/lib/cliproxyapi/plugins \
   /var/lib/cliproxyapi/static
 install -d -o cpausage -g cpausage -m 0700 /var/lib/cpa-usage-keeper
+install -d -o codexnet -g codexnet -m 0700 /var/lib/codex-network-monitor
 
 CLIPROXY_ASSET="CLIProxyAPI_${CLIPROXY_VERSION}_linux_${CLIPROXY_ARCH}_no-plugin.tar.gz"
 KEEPER_ASSET="cpa-usage-keeper_v${KEEPER_VERSION}_linux_${KEEPER_ARCH}.tar.gz"
 USAGE_UI_ASSET="cpa-usage-ui_${USAGE_UI_VERSION}.tar.gz"
 USAGE_UI_PACKAGE="${USAGE_UI_ASSET%.tar.gz}"
+NETWORK_MONITOR_ASSET="codex-network-monitor.py"
 
 log "Downloading and verifying CLIProxyAPI v${CLIPROXY_VERSION}"
 curl --proto '=https' --tlsv1.2 -fL \
@@ -393,6 +500,16 @@ tar -xzf "$WORK_DIR/$KEEPER_ASSET" -C "$WORK_DIR/keeper"
 KEEPER_BIN="$(find "$WORK_DIR/keeper" -type f -name cpa-usage-keeper -print -quit)"
 [[ -n "$KEEPER_BIN" ]] || die "CPA Usage Keeper binary was not found in the release archive."
 install -o root -g root -m 0755 "$KEEPER_BIN" /opt/cpa-usage-keeper/cpa-usage-keeper
+
+log "Downloading and verifying the network traffic monitor"
+curl --proto '=https' --tlsv1.2 -fL \
+  --connect-timeout 15 --max-time 600 --retry 3 --retry-delay 2 --retry-all-errors \
+  "https://github.com/2004liangle/codex-oauth-relay-deploy/releases/download/v${DEPLOY_RELEASE_VERSION}/${NETWORK_MONITOR_ASSET}" \
+  -o "$WORK_DIR/$NETWORK_MONITOR_ASSET"
+printf '%s  %s\n' "$NETWORK_MONITOR_SHA256" "$WORK_DIR/$NETWORK_MONITOR_ASSET" | sha256sum -c -
+python3 -m py_compile "$WORK_DIR/$NETWORK_MONITOR_ASSET"
+install -o root -g root -m 0755 \
+  "$WORK_DIR/$NETWORK_MONITOR_ASSET" /opt/codex-network-monitor/network_monitor.py
 
 log "Downloading and verifying the plain-Chinese usage dashboard ${USAGE_UI_VERSION}"
 curl --proto '=https' --tlsv1.2 -fL \
@@ -702,9 +819,77 @@ ReadWritePaths=/var/lib/cpa-usage-keeper
 WantedBy=multi-user.target
 EOF
 
+log "Configuring the loopback-only network traffic monitor"
+cat >/etc/codex-network-monitor/env <<EOF
+NETWORK_INTERFACE=$NETWORK_INTERFACE
+NETWORK_MONITOR_DATABASE=/var/lib/codex-network-monitor/network-monitor.db
+NETWORK_MONITOR_LISTEN_HOST=127.0.0.1
+NETWORK_MONITOR_LISTEN_PORT=18082
+NETWORK_MONITOR_INTERNAL_TOKEN=$NETWORK_MONITOR_INTERNAL_TOKEN
+NETWORK_MONITOR_SAMPLE_SECONDS=2
+TRAFFIC_PACKAGE_TOTAL_GB=$TRAFFIC_PACKAGE_TOTAL_GB
+TRAFFIC_PACKAGE_START_AT=$TRAFFIC_PACKAGE_START_AT
+TRAFFIC_PACKAGE_END_AT=$TRAFFIC_PACKAGE_END_AT
+TRAFFIC_PACKAGE_TX_OFFSET_BYTES=$TRAFFIC_PACKAGE_TX_OFFSET_BYTES
+PURCHASED_BANDWIDTH_MBPS=$PURCHASED_BANDWIDTH_MBPS
+EOF
+chown root:codexnet /etc/codex-network-monitor/env
+chmod 0640 /etc/codex-network-monitor/env
+
+cat >/etc/systemd/system/codex-network-monitor.service <<'EOF'
+[Unit]
+Description=Loopback-only network traffic monitor for the Codex relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codexnet
+Group=codexnet
+EnvironmentFile=/etc/codex-network-monitor/env
+WorkingDirectory=/var/lib/codex-network-monitor
+ExecStart=/usr/bin/python3 /opt/codex-network-monitor/network_monitor.py
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0077
+MemoryAccounting=true
+MemoryHigh=128M
+MemoryMax=192M
+TasksMax=32
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
+ReadWritePaths=/var/lib/codex-network-monitor
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 systemctl enable cpa-usage-keeper
 systemctl restart cpa-usage-keeper
+systemctl enable codex-network-monitor
+systemctl restart codex-network-monitor
 
 log "Configuring the public Nginx entry point"
 cat >/etc/nginx/sites-available/codex-relay <<EOF
@@ -761,6 +946,57 @@ server {
 
     location = /usage {
         return 308 /usage/;
+    }
+
+    # The sidecar trusts only Nginx's private token. Public access is first
+    # authorized against Keeper's admin-only status route, so API-key viewer
+    # sessions receive 403 and unauthenticated requests receive 401.
+    location = /_codex_network_monitor_auth {
+        internal;
+        proxy_pass http://127.0.0.1:18081/usage/api/v1/status;
+        proxy_method GET;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Connection "";
+        proxy_set_header Host \$http_host;
+        proxy_set_header Cookie \$http_cookie;
+        proxy_set_header X-CPA-Usage-Keeper-Embed \$http_x_cpa_usage_keeper_embed;
+        proxy_set_header X-CPA-Usage-Keeper-Embed-Session \$http_x_cpa_usage_keeper_embed_session;
+        proxy_set_header X-CPA-Usage-Keeper-Request \$http_x_cpa_usage_keeper_request;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+
+    location = /usage/api/v1/server-network {
+        if (\$request_method !~ ^(GET|HEAD)\$) { return 405; }
+        auth_request /_codex_network_monitor_auth;
+        proxy_pass http://127.0.0.1:18082/summary;
+        proxy_pass_request_headers off;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host 127.0.0.1;
+        proxy_set_header X-Codex-Network-Token "$NETWORK_MONITOR_INTERNAL_TOKEN";
+        proxy_hide_header Server;
+        proxy_read_timeout 10s;
+        add_header Cache-Control "no-store" always;
+        add_header Pragma "no-cache" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    location = /usage/api/v1/server-network/history {
+        if (\$request_method !~ ^(GET|HEAD)\$) { return 405; }
+        auth_request /_codex_network_monitor_auth;
+        proxy_pass http://127.0.0.1:18082/history;
+        proxy_pass_request_headers off;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host 127.0.0.1;
+        proxy_set_header X-Codex-Network-Token "$NETWORK_MONITOR_INTERNAL_TOKEN";
+        proxy_hide_header Server;
+        proxy_read_timeout 10s;
+        add_header Cache-Control "no-store" always;
+        add_header Pragma "no-cache" always;
+        add_header X-Content-Type-Options "nosniff" always;
     }
 
     location ^~ /usage/api/ {
@@ -958,11 +1194,23 @@ EOF
 chmod 0600 /root/codex-relay-credentials.txt
 
 log "Running final service checks"
-for service in squid cliproxyapi cpa-usage-keeper nginx; do
+for service in squid cliproxyapi cpa-usage-keeper codex-network-monitor nginx; do
   systemctl is-active --quiet "$service" || die "$service is not active. Check: journalctl -u $service"
 done
 
 LOCAL_URL="http://127.0.0.1:$PUBLIC_PORT"
+wait_for_http 200 "http://127.0.0.1:18082/healthz" \
+  -H "X-Codex-Network-Token: $NETWORK_MONITOR_INTERNAL_TOKEN" || \
+  die "The network traffic monitor did not become ready."
+if ! ss -H -ltn | awk '
+  $4 ~ /(^|:)18082$/ {
+    found = 1
+    if ($4 != "127.0.0.1:18082") bad = 1
+  }
+  END { exit found && !bad ? 0 : 1 }
+'; then
+  die "The network traffic monitor is not restricted to 127.0.0.1:18082."
+fi
 wait_for_http 200 "$LOCAL_URL/usage/" || die "The usage dashboard did not become ready."
 curl --noproxy '*' -fsS "$LOCAL_URL/usage/" | \
   grep -Fq '<title>Codex 中转使用情况</title>' || \
@@ -973,6 +1221,32 @@ wait_for_http 200 "$LOCAL_URL/usage/healthz" || \
   die "The usage dashboard health endpoint did not become ready."
 wait_for_http 401 "$LOCAL_URL/usage/api/v1/status" || \
   die "The usage dashboard API authentication is not enforced."
+wait_for_http 401 "$LOCAL_URL/usage/api/v1/server-network" || \
+  die "The network traffic summary does not require dashboard administrator authentication."
+wait_for_http 401 "$LOCAL_URL/usage/api/v1/server-network/history?range=24h" || \
+  die "The network traffic history does not require dashboard administrator authentication."
+
+NETWORK_MONITOR_COOKIE_JAR="$WORK_DIR/network-monitor-admin-cookies.txt"
+NETWORK_MONITOR_LOGIN_CODE="$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' \
+  -c "$NETWORK_MONITOR_COOKIE_JAR" \
+  -H 'Content-Type: application/json' \
+  -H 'X-CPA-Usage-Keeper-Request: fetch' \
+  --data "$(jq -nc --arg password "$DASHBOARD_PASSWORD" '{password:$password}')" \
+  "$LOCAL_URL/usage/api/v1/auth/login" 2>/dev/null || true)"
+[[ "$NETWORK_MONITOR_LOGIN_CODE" == "204" ]] || \
+  die "Could not create a dashboard administrator session for the network monitor check."
+wait_for_http 200 "$LOCAL_URL/usage/api/v1/server-network" \
+  -b "$NETWORK_MONITOR_COOKIE_JAR" || \
+  die "The authenticated network traffic summary did not become ready."
+wait_for_http 200 "$LOCAL_URL/usage/api/v1/server-network" \
+  -I -b "$NETWORK_MONITOR_COOKIE_JAR" || \
+  die "The authenticated network traffic summary does not support HEAD."
+wait_for_http 200 "$LOCAL_URL/usage/api/v1/server-network/history?range=24h" \
+  -b "$NETWORK_MONITOR_COOKIE_JAR" || \
+  die "The authenticated network traffic history did not become ready."
+wait_for_http 405 "$LOCAL_URL/usage/api/v1/server-network" \
+  -X POST -b "$NETWORK_MONITOR_COOKIE_JAR" || \
+  die "The network traffic summary accepts unsupported methods."
 wait_for_http 404 "$LOCAL_URL/usage/assets/not-a-real-asset.js" || \
   die "A missing usage dashboard asset does not return 404."
 wait_for_http 200 "$LOCAL_URL/management.html" || die "The management page did not become ready."
@@ -1101,7 +1375,9 @@ Credentials were also saved to /root/codex-relay-credentials.txt with mode 0600.
 Inference test: $INFERENCE_STATUS
 
 Usage events are retained in SQLite without automatic cleanup. Request body logs are capped at 512 MiB.
-Check disk usage periodically with: du -sh /var/lib/cpa-usage-keeper /var/lib/cliproxyapi/logs
+Network traffic monitoring starts from this installation and reads the host interface $NETWORK_INTERFACE.
+It is a local estimate and can differ from the cloud provider's billed package usage.
+Check disk usage periodically with: du -sh /var/lib/cpa-usage-keeper /var/lib/codex-network-monitor /var/lib/cliproxyapi/logs
 Management GET responses can contain API keys and full request bodies. Use HTTPS or restrict
 the cloud firewall to your own client IPs before relying on the public management view.
 EOF
@@ -1118,7 +1394,7 @@ Codex authentication is still pending. Run:
 
 Then restart and verify:
 
-  sudo systemctl restart cliproxyapi cpa-usage-keeper
+  sudo systemctl restart cliproxyapi cpa-usage-keeper codex-network-monitor
   API_KEY=$(sudo sed -n 's/^API_KEY=//p' /root/codex-relay-credentials.txt)
 EOF
   printf "  curl -H \"Authorization: Bearer \\\$API_KEY\" http://127.0.0.1:%s/v1/models\n" "$PUBLIC_PORT"

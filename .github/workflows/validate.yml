@@ -32,6 +32,10 @@ jobs:
         run: |
           python3 -m py_compile artifact-relay/artifact_relay.py
           python3 -m unittest -v tests/test_artifact_relay.py
+      - name: Validate Network Monitor
+        run: |
+          python3 -m py_compile network-monitor/network_monitor.py
+          python3 -m unittest -v tests/test_network_monitor.py
       - name: Build and validate portable Agent Skill
         run: |
           python3 -m unittest -v tests/test_relay_artifacts.py tests/test_skill_package.py
@@ -47,7 +51,7 @@ jobs:
           test "$pinned_sha" = "$actual_sha"
       - name: Verify usage dashboard package pin
         run: |
-          actual_sha="$(sha256sum /tmp/usage-ui-dist/cpa-usage-ui_1.13.2-plain-zh.1.tar.gz | cut -d' ' -f1)"
+          actual_sha="$(sha256sum /tmp/usage-ui-dist/cpa-usage-ui_1.13.2-plain-zh.2.tar.gz | cut -d' ' -f1)"
           pinned_sha="$(awk -F'"' '$1 == "USAGE_UI_SHA256=" { print $2 }' install-codex-relay.sh)"
           test -n "$pinned_sha"
           test "$pinned_sha" = "$actual_sha"

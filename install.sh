@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 umask 077
 
-INSTALLER_URL="https://github.com/2004liangle/codex-oauth-relay-deploy/releases/download/v1.3.2/install-codex-relay.sh"
-INSTALLER_SHA256="fa312b3be28fb7c7221f2357d9fd7a0a4ed43b21164a169c6166e9ed99726ce8"
+INSTALLER_URL="https://github.com/2004liangle/codex-oauth-relay-deploy/releases/download/v1.4.0/install-codex-relay.sh"
+INSTALLER_SHA256="df6357791eb05eb1d43231eb9733037efbc697564a99e4ebd388c54f3a360da3"
 INSTALLER_FILE="$(mktemp /tmp/install-codex-relay.XXXXXX.sh)"
 
 cleanup() {

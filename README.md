@@ -22,7 +22,7 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 - systemd 作为 PID 1
 - root 或 sudo 权限
 - 出站 TCP 443 可访问 GitHub、OpenAI 和 ChatGPT 相关域名
-- 公网端口默认 `8317`；内部端口 `18080`、`18081`、`18317`、`18318` 不得占用
+- 公网端口默认 `8317`；内部端口 `18080`、`18081`、`18082`、`18317`、`18318` 不得占用
 
 ## 安装结果
 
@@ -47,6 +47,25 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 新浏览器第一次打开用量后台时默认显示简体中文，页面把常见性能缩写换成了直接说明，例如“开始回复等待时间”“整次请求耗时”“每分钟请求数”和“每分钟总用量”。`Token`、`API Key` 等接口中的固定名称会保留，避免配置时对不上字段。
 
 右上角仍可切换英文或繁体中文，手动选择后会记住该语言。这个定制只替换浏览器中的静态页面；用量数据库、登录密码和后台 API 仍由 CPA Usage Keeper 管理。
+
+### 本机网速和流量
+
+用量后台的“服务器流量”页会显示当前上传、下载速度、监控以来的累计流量、峰值带宽和历史曲线。采集服务只监听 `127.0.0.1:18082`，外网不能直接连接；浏览器请求先由 CPA Usage Keeper 校验管理员会话，再由 Nginx 转发。使用 Relay API Key 登录的只读账号不能查看本机流量。
+
+首次安装以当时的网卡计数为起点，不会把开机以来的历史流量误算成流量包用量。默认只统计、不启用流量包进度。安装时可设置流量包大小、周期和购买带宽，例如：
+
+```bash
+sudo env \
+  TRAFFIC_PACKAGE_TOTAL_GB=1000 \
+  TRAFFIC_PACKAGE_START_AT=2026-07-01T00:00:00+08:00 \
+  TRAFFIC_PACKAGE_END_AT=2026-08-01T00:00:00+08:00 \
+  PURCHASED_BANDWIDTH_MBPS=100 \
+  bash /tmp/install.sh
+```
+
+如果流量包在安装监控前已经使用了一部分，可额外设置 `TRAFFIC_PACKAGE_TX_OFFSET_BYTES`，把云厂商已记录的出站字节数计入进度。安装后也可编辑 `/etc/codex-network-monitor/env` 并执行 `sudo systemctl restart codex-network-monitor` 更新这些值；数据库中的累计监控记录不会因此清空。
+
+这里读取的是指定网卡的全部收发字节，包括中转请求、SSH、系统更新、飞书上传及其他网络通信。流量包通常按服务器出站流量结算，但云厂商可能有免计费方向、地域或协议规则，因此页面标注为本机估算，最终扣量仍以云厂商控制台为准。
 
 ## 图片生成与编辑
 
@@ -105,6 +124,7 @@ relay-artifacts/
 - GitHub 引导脚本通过 HTTPS 下载，并在内部使用固定 SHA-256 校验完整安装器。
 - 部署后的 Nginx 入口默认使用 HTTP。开放端口前，应把云安全组来源限制为自己的客户端 IP；来源不固定时先配置 HTTPS。
 - CLIProxyAPI、Squid 和 Usage Keeper 的内部端口不得直接开放到公网。
+- 网络流量采集服务的 `18082` 端口只监听本机回环地址，不需要也不应加入云安全组或系统防火墙放行规则。
 - 所有公网推理路由都在 Nginx 读取正文前核对完整 Relay Key；仅有非空但错误的 Authorization 不会进入 CLIProxyAPI 请求日志。
 - `/v1/images/edits` 只允许 `POST`，单请求上限为 64 MiB，并限制全局同时处理一个编辑上传；通用 `/v1/files`、尾斜杠和子路径保持关闭。
 - CLIProxyAPI 使用 systemd 内存与交换空间上限。达到上限时单次请求可能失败，但不会无限挤占整台服务器。
@@ -131,7 +151,8 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 
 - CLIProxyAPI `7.2.80`
 - CPA Usage Keeper `1.13.2`
-- 白话中文用量页面 `1.13.2-plain-zh.1`
+- 白话中文用量页面 `1.13.2-plain-zh.2`
+- Codex Network Monitor（随本仓库发布并固定 SHA-256）
 - CLIProxy API Management Center `1.18.3`
 
 脚本会校验每个下载产物的 SHA-256，不匹配时立即停止。
