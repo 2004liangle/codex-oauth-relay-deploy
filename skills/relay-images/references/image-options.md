@@ -8,7 +8,7 @@ Use `gpt-image-2`. It supports generation, editing, multiple reference images, m
 
 - Model availability depends on the relay's authenticated Codex account. Do not silently switch models after an unsupported-model error.
 - Do not set `input_fidelity` for `gpt-image-2`; the API always processes every image input at high fidelity.
-- `gpt-image-2` does not currently support `background=transparent`. Use `auto` or `opaque`, or explain the limitation before changing models or applying local post-processing.
+- The direct `gpt-image-2` route does not currently provide reliable `background=transparent` output. Transparent output is supported only through `artifact-generate` or `artifact-edit`, where the client first requires advertised Alpha validation and the artifact service applies local background removal when necessary.
 
 Bundled client defaults are `gpt-image-2`, `quality=low`, `size=1024x1024`, `output_format=png`, `background=auto`, `moderation=auto`, `n=1`, non-streaming, and a 300-second timeout. Override them only to serve the request.
 
@@ -22,7 +22,7 @@ Bundled client defaults are `gpt-image-2`, `quality=low`, `size=1024x1024`, `out
 | `output_compression` | integer `0`-`100` | CLI: `--compression`. Send only for JPEG or WebP. Higher values preserve more detail and create larger files. |
 | `n` | integer `1`-`10` | Variants of one prompt. Use separate jobs and prompts for distinct assets. |
 | `moderation` | `auto`, `low` | Keep `auto` unless the user has a valid reason for the supported lower setting. |
-| `background` | `auto`, `opaque` for `gpt-image-2` | This controls output background behavior, not the visual scene described in the prompt. |
+| `background` | `auto`, `opaque`; `transparent` in artifact mode | Transparent output requires PNG and server-side artifact delivery. Use `--cutout-model isnet-anime` for anime characters; the default general model handles other subjects. |
 
 ## `gpt-image-2` size validation
 

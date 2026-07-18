@@ -6,8 +6,13 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE="$SCRIPT_DIR/artifact-relay/artifact_relay.py"
+BACKGROUND_REMOVER_SOURCE="$SCRIPT_DIR/artifact-relay/remove_background.py"
+REQUIREMENTS_SOURCE="$SCRIPT_DIR/artifact-relay/requirements.txt"
 INSTALL_ROOT="/opt/codex-artifact-relay"
+VENV=""
+VENV_STAGING=""
 STATE_DIR="/var/lib/codex-artifact-relay"
+MODEL_DIR="$STATE_DIR/models"
 CONFIG_DIR="/etc/codex-artifact-relay"
 ENV_FILE="$CONFIG_DIR/env"
 UNIT_FILE="/etc/systemd/system/codex-artifact-relay.service"
@@ -16,11 +21,22 @@ NGINX_SITE="/etc/nginx/sites-available/codex-relay"
 NGINX_SNIPPET="/etc/nginx/snippets/codex-artifact-relay-locations.conf"
 INTERNAL_PORT="${ARTIFACT_RELAY_PORT:-18318}"
 WORKER_COUNT="${ARTIFACT_RELAY_WORKERS:-2}"
+REMBG_VERSION="2.0.77"
+PYTHON_BIN="${ARTIFACT_RELAY_PYTHON:-}"
+GENERAL_MODEL_SHA256="60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a"
+ANIME_MODEL_SHA256="f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99"
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
 }
+
+cleanup() {
+  if [[ -n "$VENV_STAGING" && -d "$VENV_STAGING" ]]; then
+    rm -rf -- "$VENV_STAGING"
+  fi
+}
+trap cleanup EXIT
 
 wait_for_http() {
   local expected="$1"
@@ -39,6 +55,49 @@ wait_for_http() {
 
 [[ ${EUID} -eq 0 ]] || die "Run this installer with sudo or as root."
 [[ -f "$SOURCE" ]] || die "Run this script from the codex-oauth-relay-deploy checkout."
+[[ -f "$BACKGROUND_REMOVER_SOURCE" ]] || die "The background-removal helper is missing."
+[[ -f "$REQUIREMENTS_SOURCE" ]] || die "The artifact relay requirements file is missing."
+if [[ -n "$PYTHON_BIN" ]]; then
+  [[ "$PYTHON_BIN" == /* && "$PYTHON_BIN" =~ ^/[A-Za-z0-9_./+-]+$ ]] || \
+    die "ARTIFACT_RELAY_PYTHON must be a safe absolute executable path."
+  [[ -x "$PYTHON_BIN" ]] || die "ARTIFACT_RELAY_PYTHON is not executable: $PYTHON_BIN"
+  PYTHON_BIN="$(readlink -f -- "$PYTHON_BIN")"
+else
+  for CANDIDATE in \
+    /usr/bin/python3 \
+    /usr/bin/python3.13 /usr/bin/python3.12 /usr/bin/python3.11 \
+    /usr/local/bin/python3 /usr/local/bin/python3.13 \
+    /usr/local/bin/python3.12 /usr/local/bin/python3.11; do
+    if [[ -x "$CANDIDATE" ]] && \
+      "$CANDIDATE" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+        >/dev/null 2>&1; then
+      PYTHON_BIN="$(readlink -f -- "$CANDIDATE")"
+      break
+    fi
+  done
+fi
+[[ -n "$PYTHON_BIN" ]] || \
+  die "Transparent artifact output requires Python 3.11 or newer. Set ARTIFACT_RELAY_PYTHON to its absolute path."
+[[ "$PYTHON_BIN" == /* && "$PYTHON_BIN" =~ ^/[A-Za-z0-9_./+-]+$ ]] || \
+  die "The selected Python resolves to an unsupported path."
+"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || \
+  die "ARTIFACT_RELAY_PYTHON must point to Python 3.11 or newer."
+if ! "$PYTHON_BIN" -c 'import ensurepip, venv' >/dev/null 2>&1; then
+  PYTHON_SERIES="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  if [[ "$PYTHON_BIN" == /usr/bin/python3 ]]; then
+    VENV_PACKAGE="python3-venv"
+  elif [[ "$PYTHON_BIN" == /usr/bin/python* ]]; then
+    VENV_PACKAGE="python${PYTHON_SERIES}-venv"
+  else
+    die "The selected Python lacks venv/ensurepip. Install its venv support and retry."
+  fi
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$VENV_PACKAGE"
+fi
+REQUIREMENTS_SHA="$(sha256sum "$REQUIREMENTS_SOURCE" | cut -d' ' -f1)"
+PYTHON_TAG="$("$PYTHON_BIN" -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
+[[ "$PYTHON_TAG" =~ ^cp[0-9]{3}$ ]] || die "Could not determine the selected Python ABI tag."
+VENV="$INSTALL_ROOT/venv-${PYTHON_TAG}-${REQUIREMENTS_SHA:0:16}"
 [[ -f "$NGINX_SITE" ]] || die "The managed Codex relay Nginx site is missing."
 [[ -r /etc/cliproxyapi/config.yaml ]] || die "The managed Codex relay configuration is missing."
 grep -Fq "map \$http_authorization \$codex_relay_api_authorized" "$NGINX_SITE" || \
@@ -119,7 +178,52 @@ printf '%s' "$STATUS_JSON" | jq -e --arg identity "$LARK_IDENTITY" \
 install -d -o root -g root -m 0755 "$INSTALL_ROOT"
 install -d -o root -g "$RUN_GROUP" -m 0750 "$CONFIG_DIR"
 install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0700 "$STATE_DIR"
+install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0700 "$MODEL_DIR"
+
+INSTALLED_REQUIREMENTS_SHA=""
+if [[ -r "$VENV/.artifact-relay-requirements.sha256" ]]; then
+  INSTALLED_REQUIREMENTS_SHA="$(cat "$VENV/.artifact-relay-requirements.sha256")"
+fi
+if [[ "$INSTALLED_REQUIREMENTS_SHA" != "$REQUIREMENTS_SHA" ]] || \
+  ! "$VENV/bin/python" -c "from importlib.metadata import version; raise SystemExit(0 if version('rembg') == '$REMBG_VERSION' else 1)" >/dev/null 2>&1; then
+  VENV_STAGING="$(mktemp -d "$INSTALL_ROOT/.venv-staging.XXXXXX")"
+  "$PYTHON_BIN" -m venv "$VENV_STAGING" || die "Could not create the background-removal environment."
+  "$VENV_STAGING/bin/python" -m pip install --disable-pip-version-check --no-cache-dir \
+    --index-url https://pypi.org/simple --only-binary=:all: \
+    --requirement "$REQUIREMENTS_SOURCE" || die "Could not install background-removal dependencies."
+  printf '%s\n' "$REQUIREMENTS_SHA" >"$VENV_STAGING/.artifact-relay-requirements.sha256"
+  chown -R root:"$RUN_GROUP" "$VENV_STAGING"
+  chmod -R u=rwX,g=rX,o= "$VENV_STAGING"
+  if [[ -e "$VENV" ]]; then
+    mv "$VENV" "$VENV.invalid-$(date -u '+%Y%m%dT%H%M%SZ')"
+  fi
+  mv "$VENV_STAGING" "$VENV"
+  VENV_STAGING=""
+fi
+chown -R root:"$RUN_GROUP" "$VENV"
+chmod -R u=rwX,g=rX,o= "$VENV"
+
+for MODEL in isnet-general-use isnet-anime; do
+  runuser -u "$RUN_USER" -- env -i \
+    HOME="$STATE_DIR" \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    OMP_NUM_THREADS=2 \
+    U2NET_HOME="$MODEL_DIR" \
+    XDG_CACHE_HOME="$STATE_DIR/cache" \
+    "$VENV/bin/python" "$BACKGROUND_REMOVER_SOURCE" warmup --model "$MODEL" || \
+    die "Could not initialize background-removal model: $MODEL"
+done
+[[ -s "$MODEL_DIR/isnet-general-use.onnx" ]] || die "The general background-removal model is missing."
+[[ -s "$MODEL_DIR/isnet-anime.onnx" ]] || die "The anime background-removal model is missing."
+printf '%s  %s\n' "$GENERAL_MODEL_SHA256" "$MODEL_DIR/isnet-general-use.onnx" | \
+  sha256sum -c - >/dev/null || die "The general background-removal model checksum is invalid."
+printf '%s  %s\n' "$ANIME_MODEL_SHA256" "$MODEL_DIR/isnet-anime.onnx" | \
+  sha256sum -c - >/dev/null || die "The anime background-removal model checksum is invalid."
+
 install -o root -g root -m 0755 "$SOURCE" "$INSTALL_ROOT/artifact_relay.py"
+install -o root -g root -m 0755 "$BACKGROUND_REMOVER_SOURCE" "$INSTALL_ROOT/remove_background.py"
+install -o root -g root -m 0644 "$REQUIREMENTS_SOURCE" "$INSTALL_ROOT/requirements.txt"
 
 cat >"$ENV_FILE" <<EOF
 ARTIFACT_RELAY_API_KEY=$API_KEY
@@ -134,6 +238,11 @@ ARTIFACT_RELAY_LARK_HOME=$RUN_HOME
 ARTIFACT_RELAY_LARK_IDENTITY=$LARK_IDENTITY
 ARTIFACT_RELAY_FEISHU_INPUT_FOLDER_TOKEN=$FEISHU_INPUT_FOLDER_TOKEN
 ARTIFACT_RELAY_FEISHU_OUTPUT_FOLDER_TOKEN=$FEISHU_OUTPUT_FOLDER_TOKEN
+ARTIFACT_RELAY_BACKGROUND_REMOVAL_PYTHON=$VENV/bin/python
+ARTIFACT_RELAY_BACKGROUND_REMOVAL_SCRIPT=$INSTALL_ROOT/remove_background.py
+ARTIFACT_RELAY_BACKGROUND_REMOVAL_MODEL_DIR=$MODEL_DIR
+ARTIFACT_RELAY_BACKGROUND_REMOVAL_MODEL=isnet-general-use
+ARTIFACT_RELAY_BACKGROUND_REMOVAL_TIMEOUT=600
 EOF
 chown root:"$RUN_GROUP" "$ENV_FILE"
 chmod 0640 "$ENV_FILE"
@@ -152,7 +261,7 @@ Group=$RUN_GROUP
 WorkingDirectory=$STATE_DIR
 EnvironmentFile=$ENV_FILE
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 $INSTALL_ROOT/artifact_relay.py serve
+ExecStart=$VENV/bin/python $INSTALL_ROOT/artifact_relay.py serve
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
@@ -195,7 +304,7 @@ set -a
 source $ENV_FILE
 set +a
 exec runuser --preserve-environment -u $RUN_USER -- \
-  /usr/bin/python3 $INSTALL_ROOT/artifact_relay.py "\$@"
+  $VENV/bin/python $INSTALL_ROOT/artifact_relay.py "\$@"
 EOF
 chown root:root "$LOCAL_CLI"
 chmod 0750 "$LOCAL_CLI"
@@ -289,5 +398,38 @@ curl --noproxy '*' -fsS \
   jq -e --arg token "$FEISHU_INPUT_FOLDER_TOKEN" \
   '.delivery == "lark_drive" and .retention == "manual" and .input_target.token == $token' \
   >/dev/null || die "Artifact capabilities are not available through Nginx."
+
+mapfile -t INSTALLED_VENVS < <(
+  find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 -type d \
+    \( -name venv -o -name 'venv-*' \) -printf '%T@ %f\n' | sort -rn | awk '{print $2}'
+)
+ROLLBACK_KEPT=0
+for VENV_NAME in "${INSTALLED_VENVS[@]}"; do
+  [[ "$VENV_NAME" == "venv" || "$VENV_NAME" =~ ^venv(-cp[0-9]{3})?-[0-9a-f]{16}$ ]] || \
+    continue
+  VENV_PATH="$INSTALL_ROOT/$VENV_NAME"
+  if [[ "$VENV_PATH" == "$VENV" ]]; then
+    continue
+  fi
+  if (( ROLLBACK_KEPT == 0 )); then
+    ROLLBACK_KEPT=1
+    continue
+  fi
+  rm -rf -- "$VENV_PATH"
+done
+for INVALID_PATH in "$INSTALL_ROOT"/*; do
+  [[ -d "$INVALID_PATH" ]] || continue
+  INVALID_NAME="$(basename -- "$INVALID_PATH")"
+  if [[ "$INVALID_NAME" =~ ^venv(-cp[0-9]{3})?-[0-9a-f]{16}\.invalid-[0-9]{8}T[0-9]{6}Z$ ]]; then
+    rm -rf -- "$INVALID_PATH"
+  fi
+done
+for STAGING_PATH in "$INSTALL_ROOT"/.venv-staging.*; do
+  [[ -d "$STAGING_PATH" ]] || continue
+  STAGING_NAME="$(basename -- "$STAGING_PATH")"
+  if [[ "$STAGING_NAME" =~ ^\.venv-staging\.[A-Za-z0-9]{6}$ ]]; then
+    rm -rf -- "$STAGING_PATH"
+  fi
+done
 
 printf 'Artifact relay installed. Public routes use the existing API base URL and relay key.\n'

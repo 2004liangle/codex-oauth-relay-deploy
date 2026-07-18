@@ -97,6 +97,7 @@ else:
 class FakeRelayHandler(BaseHTTPRequestHandler):
     requests: list[dict[str, object]] = []
     artifact_jobs: dict[str, dict[str, object]] = {}
+    advertise_transparent = True
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -121,25 +122,30 @@ class FakeRelayHandler(BaseHTTPRequestHandler):
         elif self.path == "/v1/models":
             self._send_json(200, {"data": [{"id": "gpt-image-2"}]})
         elif self.path == "/v1/artifact-capabilities":
-            self._send_json(
-                200,
-                {
-                    "delivery": "lark_drive",
-                    "input_target": {"type": "wiki", "token": "wikiInputToken"},
-                    "identity": "bot",
-                    "operations": ["image.generate", "image.edit", "attachment.process"],
-                    "retention": "manual",
-                    "status_values": [
-                        "queued",
-                        "downloading",
-                        "processing",
-                        "uploading",
-                        "ready_for_processing",
-                        "completed",
-                        "failed",
-                    ],
-                },
-            )
+            capabilities = {
+                "delivery": "lark_drive",
+                "input_target": {"type": "wiki", "token": "wikiInputToken"},
+                "identity": "bot",
+                "operations": ["image.generate", "image.edit", "attachment.process"],
+                "retention": "manual",
+                "status_values": [
+                    "queued",
+                    "downloading",
+                    "processing",
+                    "uploading",
+                    "ready_for_processing",
+                    "completed",
+                    "failed",
+                ],
+            }
+            if self.advertise_transparent:
+                capabilities["transparent_output"] = {
+                    "format": "png",
+                    "models": ["isnet-general-use", "isnet-anime"],
+                    "default_model": "isnet-general-use",
+                    "alpha_validation": True,
+                }
+            self._send_json(200, capabilities)
         elif self.path.startswith("/v1/artifact-jobs/"):
             request_id = self.path.rsplit("/", 1)[-1]
             job = self.artifact_jobs.get(request_id)
@@ -212,9 +218,13 @@ class FakeRelayHandler(BaseHTTPRequestHandler):
 
 
 class RelayServer:
+    def __init__(self, advertise_transparent: bool = True):
+        self.advertise_transparent = advertise_transparent
+
     def __enter__(self) -> "RelayServer":
         FakeRelayHandler.requests = []
         FakeRelayHandler.artifact_jobs = {}
+        FakeRelayHandler.advertise_transparent = self.advertise_transparent
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeRelayHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -668,6 +678,12 @@ class CliIntegrationTests(unittest.TestCase):
                 "5",
                 "--timeout",
                 "2",
+                "--background",
+                "transparent",
+                "--format",
+                "png",
+                "--cutout-model",
+                "isnet-anime",
                 extra_env={
                     "FAKE_LARK_DOWNLOAD": str(remote),
                     "FAKE_LARK_FAIL_ONCE": str(marker),
@@ -686,6 +702,16 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertIn("/v1/artifact-jobs", paths)
             self.assertIn("/v1/artifact-jobs/job-generate-1", paths)
             self.assertNotIn(SECRET, result.stdout + result.stderr)
+            artifact_posts = [
+                item
+                for item in FakeRelayHandler.requests
+                if item["method"] == "POST" and item["path"] == "/v1/artifact-jobs"
+            ]
+            payload = json.loads(artifact_posts[0]["body"])
+            self.assertEqual(payload["parameters"]["background"], "transparent")
+            self.assertEqual(
+                payload["parameters"]["background_removal_model"], "isnet-anime"
+            )
 
     def test_artifact_edit_uploads_validated_input_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory, RelayServer() as relay:
@@ -755,6 +781,10 @@ class CliIntegrationTests(unittest.TestCase):
                     "A blue cup",
                     "--request-id",
                     "job-dry-run",
+                    "--background",
+                    "transparent",
+                    "--cutout-model",
+                    "isnet-anime",
                     "--output",
                     str(output),
                     "--dry-run",
@@ -769,7 +799,35 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             plan = json.loads(result.stdout)
             self.assertEqual(plan["payload"]["request_id"], "job-dry-run")
+            self.assertEqual(
+                plan["payload"]["parameters"]["background_removal_model"], "isnet-anime"
+            )
             self.assertFalse(output.exists())
+
+    def test_transparent_artifact_is_not_submitted_to_an_old_server(self) -> None:
+        with RelayServer(advertise_transparent=False) as relay:
+            result = self.run_cli(
+                relay.base_url,
+                "artifact-generate",
+                "--prompt",
+                "Cut out the subject",
+                "--request-id",
+                "job-transparent-old-server",
+                "--background",
+                "transparent",
+                "--format",
+                "png",
+                "--request-retries",
+                "0",
+            )
+            self.assertEqual(result.returncode, relay_images.EXIT_ROUTE, result.stderr)
+            self.assertIn("job was not submitted", result.stderr)
+            artifact_posts = [
+                item
+                for item in FakeRelayHandler.requests
+                if item["method"] == "POST" and item["path"] == "/v1/artifact-jobs"
+            ]
+            self.assertEqual(artifact_posts, [])
 
     def test_live_artifact_failure_always_reports_request_id(self) -> None:
         result = self.run_cli(

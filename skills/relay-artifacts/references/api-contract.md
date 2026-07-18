@@ -65,7 +65,9 @@
 - `image.edit`：按顺序接收 1-16 个 `role=image` 输入，最多再接收一个 `role=mask` 输入；必须提供 `parameters.prompt`。
 - `artifact.handoff`：接收 1-32 个 `role=attachment` 输入；只接受可选的 `parameters.instruction` 参数。
 
-中转服务支持的图片参数包括 `model`、`prompt`、`quality`、`size`、`n`、`output_format`、`output_compression`、`background`、`moderation`、`user`，以及本地使用的 `output_name`。随附客户端开放了其中常用的参数。
+中转服务支持的图片参数包括 `model`、`prompt`、`quality`、`size`、`n`、`output_format`、`output_compression`、`background`、`moderation`、`user`，以及本地使用的 `output_name` 和 `background_removal_model`。随附客户端开放了其中常用的参数。
+
+`background=transparent` 只允许搭配 PNG。客户端会先确认服务端声明了真实 Alpha 校验能力，再提交任务；旧版服务不会消耗本次生成额度。上游没有返回真实 Alpha 时，服务端会调用本地背景分割并再次验证透明像素；验证失败则任务为 `failed`，不会上传不透明结果。`background_removal_model` 可选 `isnet-general-use` 或 `isnet-anime`，客户端参数名为 `--cutout-model`。
 
 状态值：
 

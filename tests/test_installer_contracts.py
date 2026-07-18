@@ -36,6 +36,20 @@ class UsageDashboardInstallerTests(unittest.TestCase):
         self.assertIn("ARTIFACT_RELAY_WORKERS=$WORKER_COUNT", ARTIFACT_INSTALLER)
         self.assertNotIn("ARTIFACT_RELAY_WORKERS=1", ARTIFACT_INSTALLER)
 
+    def test_artifact_relay_pins_models_and_supports_an_explicit_python(self):
+        self.assertIn('PYTHON_BIN="${ARTIFACT_RELAY_PYTHON:-}"', ARTIFACT_INSTALLER)
+        self.assertIn("ARTIFACT_RELAY_PYTHON must be a safe absolute", ARTIFACT_INSTALLER)
+        self.assertRegex(
+            ARTIFACT_INSTALLER,
+            r'GENERAL_MODEL_SHA256="[0-9a-f]{64}"',
+        )
+        self.assertRegex(
+            ARTIFACT_INSTALLER,
+            r'ANIME_MODEL_SHA256="[0-9a-f]{64}"',
+        )
+        self.assertIn('sha256sum -c - >/dev/null', ARTIFACT_INSTALLER)
+        self.assertIn('ROLLBACK_KEPT=0', ARTIFACT_INSTALLER)
+
     def test_static_ui_and_api_routes_are_separate(self):
         api = INSTALLER.index("location ^~ /usage/api/")
         network_summary = INSTALLER.index("location = /usage/api/v1/server-network {")

@@ -24,6 +24,8 @@ curl -fsSL https://github.com/2004liangle/codex-oauth-relay-deploy/releases/late
 - 出站 TCP 443 可访问 GitHub、OpenAI 和 ChatGPT 相关域名
 - 公网端口默认 `8317`；内部端口 `18080`、`18081`、`18082`、`18317`、`18318` 不得占用
 
+基础中转支持上述系统。飞书图片 Sidecar 的本地透明抠图功能还需要 Python 3.11+；Debian 12 和 Ubuntu 24.04 默认满足。Ubuntu 22.04 可并装 Python 3.11，然后在一键安装命令前设置 `ARTIFACT_RELAY_PYTHON=/usr/bin/python3.11`，不需要修改系统的 `python3` 链接。
+
 ## 安装结果
 
 安装器会生成三组独立凭据，并保存到仅 root 可读的文件：

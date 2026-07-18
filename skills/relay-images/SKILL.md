@@ -68,6 +68,11 @@ Use the bundled relay client to create or edit images while keeping project file
      --image input-1.png --image input-2.png --mask mask.png \
      --prompt-file prompt.txt --quality high --format webp \
      --compression 85 --output output/edited.webp
+
+   python3 "$RELAY_IMAGES" artifact-edit \
+     --image character.png --prompt "keep only the character" \
+     --background transparent --format png --cutout-model isnet-anime \
+     --output output/character.png
    ```
 
    Write outputs to the user's requested path or a project-local output directory. Use `--dry-run` to inspect a redacted request plan. Add `--strict-output` when exact returned dimensions and file format are hard requirements; a mismatch is still saved with its actual extension, reported as unmet, and exits nonzero. Do not create an ad hoc curl or SDK wrapper when the bundled client supports the request.

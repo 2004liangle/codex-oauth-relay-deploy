@@ -415,6 +415,40 @@ def artifact_capabilities(
     return value
 
 
+def require_transparent_artifact_output(
+    capabilities: Mapping[str, object], parameters: Mapping[str, object]
+) -> None:
+    if parameters.get("background") != "transparent":
+        return
+    feature = capabilities.get("transparent_output")
+    if (
+        not isinstance(feature, dict)
+        or feature.get("alpha_validation") is not True
+        or feature.get("format") != "png"
+    ):
+        raise RelayError(
+            "relay does not advertise validated transparent PNG output; job was not submitted",
+            EXIT_ROUTE,
+        )
+    models = feature.get("models")
+    if not isinstance(models, list) or not models or not all(
+        isinstance(item, str) for item in models
+    ):
+        raise RelayError(
+            "relay returned an invalid transparent cutout model list; job was not submitted",
+            EXIT_ROUTE,
+        )
+    requested_model = parameters.get("background_removal_model")
+    selected_model = (
+        requested_model if requested_model is not None else feature.get("default_model")
+    )
+    if not isinstance(selected_model, str) or selected_model not in models:
+        raise RelayError(
+            "relay does not support the selected transparent cutout model; job was not submitted",
+            EXIT_ROUTE,
+        )
+
+
 def validate_request_id(value: str | None) -> str:
     request_id = value or f"img-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(8)}"
     if not REQUEST_ID_RE.fullmatch(request_id):
@@ -1159,8 +1193,15 @@ def image_options(args: argparse.Namespace) -> dict[str, object]:
         raise RelayError("--compression is only valid with jpeg or webp")
     if args.compression is not None and not 0 <= args.compression <= 100:
         raise RelayError("--compression must be between 0 and 100")
-    if args.model.startswith("gpt-image-2") and args.background == "transparent":
-        raise RelayError("gpt-image-2 does not support transparent backgrounds")
+    artifact_delivery = args.command in {"artifact-generate", "artifact-edit"}
+    if args.background == "transparent" and not artifact_delivery:
+        raise RelayError(
+            "transparent backgrounds require artifact delivery with server-side cutout processing"
+        )
+    if args.background == "transparent" and args.output_format != "png":
+        raise RelayError("transparent backgrounds require PNG output")
+    if args.cutout_model is not None and args.background != "transparent":
+        raise RelayError("--cutout-model requires --background transparent")
     stream = bool(args.stream or args.partial_images)
     if stream and args.n != 1:
         raise RelayError("streaming currently requires --n 1")
@@ -1175,6 +1216,8 @@ def image_options(args: argparse.Namespace) -> dict[str, object]:
     }
     if args.compression is not None:
         options["output_compression"] = args.compression
+    if artifact_delivery and args.cutout_model is not None:
+        options["background_removal_model"] = args.cutout_model
     if stream:
         options["stream"] = True
         options["partial_images"] = args.partial_images
@@ -1986,9 +2029,15 @@ def artifact_image_summary(
         )
 
 
-def artifact_runtime(args: argparse.Namespace, require_target: bool) -> tuple[RelayConfig, LarkConfig]:
+def artifact_runtime(
+    args: argparse.Namespace,
+    require_target: bool,
+    parameters: Mapping[str, object] | None = None,
+) -> tuple[RelayConfig, LarkConfig]:
     relay = resolve_config(args)
     capabilities = artifact_capabilities(relay, args.timeout, args.request_retries)
+    if parameters is not None:
+        require_transparent_artifact_output(capabilities, parameters)
     lark = resolve_lark_config(args, capabilities, require_target=require_target)
     return relay, lark
 
@@ -2018,7 +2067,7 @@ def run_artifact_generate(args: argparse.Namespace) -> None:
         )
         return
     eprint(f"artifact request_id: {request_id}")
-    relay, lark = artifact_runtime(args, require_target=False)
+    relay, lark = artifact_runtime(args, require_target=False, parameters=parameters)
     job = submit_artifact_job(
         relay,
         request_id,
@@ -2115,7 +2164,7 @@ def run_artifact_edit(args: argparse.Namespace) -> None:
         )
         return
     eprint(f"artifact request_id: {request_id}")
-    relay, lark = artifact_runtime(args, require_target=True)
+    relay, lark = artifact_runtime(args, require_target=True, parameters=parameters)
     uploaded: list[dict[str, object]] = []
     try:
         for item in files:
@@ -2466,6 +2515,11 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--format", dest="output_format", choices=("png", "jpeg", "webp"), default="png")
     parser.add_argument("--compression", type=int)
     parser.add_argument("--background", choices=("auto", "opaque", "transparent"), default="auto")
+    parser.add_argument(
+        "--cutout-model",
+        choices=("isnet-general-use", "isnet-anime"),
+        help="server-side model used for transparent artifact output",
+    )
     parser.add_argument("--moderation", choices=("auto", "low"), default="auto")
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--stream", action="store_true")

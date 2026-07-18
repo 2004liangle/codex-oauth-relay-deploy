@@ -940,6 +940,40 @@ def check_capability(capabilities: Mapping[str, Any], operation: str) -> None:
         raise ToolError("unsupported_operation", "中转服务未声明支持 %s" % operation)
 
 
+def check_transparent_output(
+    capabilities: Mapping[str, Any], parameters: Mapping[str, Any]
+) -> None:
+    if parameters.get("background") != "transparent":
+        return
+    feature = capabilities.get("transparent_output")
+    if (
+        not isinstance(feature, dict)
+        or feature.get("alpha_validation") is not True
+        or feature.get("format") != "png"
+    ):
+        raise ToolError(
+            "transparent_output_unsupported",
+            "中转服务未启用真实透明 PNG 校验，任务尚未提交",
+        )
+    models = feature.get("models")
+    if not isinstance(models, list) or not models or not all(
+        isinstance(item, str) for item in models
+    ):
+        raise ToolError(
+            "invalid_capabilities",
+            "中转服务返回的透明抠图模型清单无效，任务尚未提交",
+        )
+    requested_model = parameters.get("background_removal_model")
+    selected_model = (
+        requested_model if requested_model is not None else feature.get("default_model")
+    )
+    if not isinstance(selected_model, str) or selected_model not in models:
+        raise ToolError(
+            "unsupported_cutout_model",
+            "中转服务不支持所选透明抠图模型，任务尚未提交",
+        )
+
+
 def input_folder(config: Config, capabilities: Mapping[str, Any]) -> str:
     if config.lark_input_folder_token:
         return config.lark_input_folder_token
@@ -1025,6 +1059,10 @@ def verify_manifest_total(manifests: Sequence[Mapping[str, Any]], capabilities: 
 
 
 def image_parameters(args: argparse.Namespace, prompt: str) -> Dict[str, Any]:
+    if args.background == "transparent" and args.output_format != "png":
+        raise ToolError("invalid_image_options", "透明背景必须使用 PNG 格式")
+    if args.cutout_model is not None and args.background != "transparent":
+        raise ToolError("invalid_image_options", "--cutout-model 只能与 --background transparent 一起使用")
     result: Dict[str, Any] = {
         "model": args.model,
         "prompt": prompt,
@@ -1036,6 +1074,7 @@ def image_parameters(args: argparse.Namespace, prompt: str) -> Dict[str, Any]:
     optional = {
         "output_compression": args.compression,
         "background": args.background,
+        "background_removal_model": args.cutout_model,
         "moderation": args.moderation,
         "output_name": args.output_name,
     }
@@ -1109,12 +1148,14 @@ def command_generate(args: argparse.Namespace) -> Dict[str, Any]:
     capabilities = relay.capabilities()
     check_capability(capabilities, "image.generate")
     prompt = read_text(args.prompt, args.prompt_file, "prompt", required=True)
+    parameters = image_parameters(args, prompt)
+    check_transparent_output(capabilities, parameters)
     request_id = validate_request_id(args.request_id) if args.request_id else new_request_id()
     job = relay.submit(
         {
             "request_id": request_id,
             "operation": "image.generate",
-            "parameters": image_parameters(args, prompt),
+            "parameters": parameters,
             "inputs": [],
         }
     )
@@ -1137,6 +1178,8 @@ def command_submit_edit(args: argparse.Namespace) -> Dict[str, Any]:
     capabilities = relay.capabilities()
     check_capability(capabilities, "image.edit")
     prompt = read_text(args.prompt, args.prompt_file, "prompt", required=True)
+    parameters = image_parameters(args, prompt)
+    check_transparent_output(capabilities, parameters)
     manifests = input_manifests(
         args.input_manifest,
         allowed_roles=("image", "mask"),
@@ -1155,7 +1198,7 @@ def command_submit_edit(args: argparse.Namespace) -> Dict[str, Any]:
         {
             "request_id": request_id,
             "operation": "image.edit",
-            "parameters": image_parameters(args, prompt),
+            "parameters": parameters,
             "inputs": manifests,
         }
     )
@@ -1223,6 +1266,9 @@ def command_submit_job(args: argparse.Namespace) -> Dict[str, Any]:
         raise ToolError("invalid_manifest", "任务清单必须包含 request_id")
     validate_request_id(request_id)
     relay = RelayClient(load_config(args))
+    parameters = payload.get("parameters")
+    if isinstance(parameters, dict) and parameters.get("background") == "transparent":
+        check_transparent_output(relay.capabilities(), parameters)
     job = relay.submit(payload)
     if args.wait or args.wait_completed:
         job = wait_for_job(
@@ -1241,6 +1287,8 @@ def command_edit(args: argparse.Namespace) -> Dict[str, Any]:
     capabilities = relay.capabilities()
     check_capability(capabilities, "image.edit")
     prompt = read_text(args.prompt, args.prompt_file, "prompt", required=True)
+    parameters = image_parameters(args, prompt)
+    check_transparent_output(capabilities, parameters)
     images = preflight_files(args.image, 1, 16)
     mask = preflight_files([args.mask], 1, 1)[0] if args.mask else None
     all_paths = images + ([mask] if mask is not None else [])
@@ -1261,7 +1309,7 @@ def command_edit(args: argparse.Namespace) -> Dict[str, Any]:
         {
             "request_id": request_id,
             "operation": "image.edit",
-            "parameters": image_parameters(args, prompt),
+            "parameters": parameters,
             "inputs": manifests,
         }
     )
@@ -1457,6 +1505,11 @@ def add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--format", dest="output_format", choices=("png", "jpeg", "webp"), default="png")
     parser.add_argument("--compression", type=int)
     parser.add_argument("--background", choices=("auto", "opaque", "transparent"))
+    parser.add_argument(
+        "--cutout-model",
+        choices=("isnet-general-use", "isnet-anime"),
+        help="透明抠图模型：普通图片选 isnet-general-use，动漫人物选 isnet-anime",
+    )
     parser.add_argument("--moderation", choices=("auto", "low"))
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--output-name")

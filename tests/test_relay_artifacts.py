@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,29 @@ SPEC.loader.exec_module(relay_artifacts)
 
 
 class HostToolsContractTests(unittest.TestCase):
+    @staticmethod
+    def transparent_generate_args():
+        return SimpleNamespace(
+            model="gpt-image-2",
+            quality="high",
+            size="1024x1024",
+            output_format="png",
+            n=1,
+            compression=None,
+            background="transparent",
+            cutout_model="isnet-anime",
+            moderation="auto",
+            output_name="character.png",
+            prompt="只保留人物",
+            prompt_file=None,
+            request_id="portable-transparent-01",
+            wait=False,
+            wait_timeout=60,
+            poll_interval=1,
+            download_dir=None,
+            overwrite=False,
+        )
+
     def test_skill_docs_and_command_help_are_simplified_chinese(self):
         skill_text = (ROOT / "skills" / "relay-artifacts" / "SKILL.md").read_text(
             encoding="utf-8"
@@ -58,6 +82,118 @@ class HostToolsContractTests(unittest.TestCase):
         self.assertEqual(manifests[0]["file_token"], "REMOTE_FILE_TOKEN")
         self.assertEqual(manifests[0]["name"], "report.txt")
         self.assertEqual(manifests[0]["role"], "attachment")
+
+    def test_transparent_cutout_options_are_forwarded_to_the_artifact_service(self):
+        args = SimpleNamespace(
+            model="gpt-image-2",
+            quality="high",
+            size="1024x1024",
+            output_format="png",
+            n=1,
+            compression=None,
+            background="transparent",
+            cutout_model="isnet-anime",
+            moderation="auto",
+            output_name="character.png",
+        )
+        parameters = relay_artifacts.image_parameters(args, "只保留人物")
+        self.assertEqual(parameters["background"], "transparent")
+        self.assertEqual(parameters["background_removal_model"], "isnet-anime")
+
+    def test_transparent_cutout_rejects_non_png_output(self):
+        args = SimpleNamespace(
+            model="gpt-image-2",
+            quality="high",
+            size="1024x1024",
+            output_format="webp",
+            n=1,
+            compression=None,
+            background="transparent",
+            cutout_model=None,
+            moderation="auto",
+            output_name=None,
+        )
+        with self.assertRaises(relay_artifacts.ToolError):
+            relay_artifacts.image_parameters(args, "只保留人物")
+
+    def test_transparent_job_requires_server_side_alpha_validation(self):
+        parameters = {
+            "background": "transparent",
+            "output_format": "png",
+            "background_removal_model": "isnet-anime",
+        }
+        with self.assertRaises(relay_artifacts.ToolError) as caught:
+            relay_artifacts.check_transparent_output({}, parameters)
+        self.assertEqual(caught.exception.code, "transparent_output_unsupported")
+
+        capabilities = {
+            "transparent_output": {
+                "format": "png",
+                "models": ["isnet-general-use", "isnet-anime"],
+                "default_model": "isnet-general-use",
+                "alpha_validation": True,
+            }
+        }
+        relay_artifacts.check_transparent_output(capabilities, parameters)
+
+    def test_transparent_job_rejects_unadvertised_cutout_model(self):
+        capabilities = {
+            "transparent_output": {
+                "format": "png",
+                "models": ["isnet-general-use"],
+                "default_model": "isnet-general-use",
+                "alpha_validation": True,
+            }
+        }
+        with self.assertRaises(relay_artifacts.ToolError) as caught:
+            relay_artifacts.check_transparent_output(
+                capabilities,
+                {
+                    "background": "transparent",
+                    "background_removal_model": "isnet-anime",
+                },
+            )
+        self.assertEqual(caught.exception.code, "unsupported_cutout_model")
+
+    def test_generate_checks_transparent_capability_before_submit(self):
+        class FakeRelay:
+            def __init__(self, capabilities):
+                self._capabilities = capabilities
+                self.submissions = []
+
+            def capabilities(self):
+                return self._capabilities
+
+            def submit(self, payload):
+                self.submissions.append(payload)
+                return {"request_id": payload["request_id"], "status": "queued"}
+
+        supported = {
+            "operations": ["image.generate"],
+            "transparent_output": {
+                "format": "png",
+                "models": ["isnet-general-use", "isnet-anime"],
+                "default_model": "isnet-general-use",
+                "alpha_validation": True,
+            },
+        }
+        relay = FakeRelay(supported)
+        with mock.patch.object(relay_artifacts, "load_config", return_value=object()), mock.patch.object(
+            relay_artifacts, "RelayClient", return_value=relay
+        ):
+            relay_artifacts.command_generate(self.transparent_generate_args())
+        self.assertEqual(len(relay.submissions), 1)
+        self.assertEqual(
+            relay.submissions[0]["parameters"]["background_removal_model"],
+            "isnet-anime",
+        )
+
+        old_relay = FakeRelay({"operations": ["image.generate"]})
+        with mock.patch.object(relay_artifacts, "load_config", return_value=object()), mock.patch.object(
+            relay_artifacts, "RelayClient", return_value=old_relay
+        ), self.assertRaises(relay_artifacts.ToolError):
+            relay_artifacts.command_generate(self.transparent_generate_args())
+        self.assertEqual(old_relay.submissions, [])
 
 
 if __name__ == "__main__":
