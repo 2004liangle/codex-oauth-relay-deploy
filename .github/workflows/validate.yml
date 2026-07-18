@@ -30,8 +30,9 @@ jobs:
           bash install-relay-images-skill.sh --verify-local skills/relay-images
       - name: Validate Artifact Relay
         run: |
-          python3 -m py_compile artifact-relay/artifact_relay.py
-          python3 -m unittest -v tests/test_artifact_relay.py
+          python3 -m pip install --disable-pip-version-check pillow==12.3.0
+          python3 -m py_compile artifact-relay/artifact_relay.py artifact-relay/remove_background.py
+          python3 -m unittest -v tests/test_artifact_relay.py tests/test_remove_background.py
       - name: Validate Network Monitor
         run: |
           python3 -m py_compile network-monitor/network_monitor.py

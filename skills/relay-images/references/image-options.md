@@ -22,7 +22,7 @@ Bundled client defaults are `gpt-image-2`, `quality=low`, `size=1024x1024`, `out
 | `output_compression` | integer `0`-`100` | CLI: `--compression`. Send only for JPEG or WebP. Higher values preserve more detail and create larger files. |
 | `n` | integer `1`-`10` | Variants of one prompt. Use separate jobs and prompts for distinct assets. |
 | `moderation` | `auto`, `low` | Keep `auto` unless the user has a valid reason for the supported lower setting. |
-| `background` | `auto`, `opaque`; `transparent` in artifact mode | Transparent output requires PNG and server-side artifact delivery. Use `--cutout-model isnet-anime` for anime characters; the default general model handles other subjects. |
+| `background` | `auto`, `opaque`; `transparent` in artifact mode | Transparent output requires PNG and server-side artifact delivery. The default general model includes fine-hair Alpha refinement and should be tried first; use `--cutout-model isnet-anime` when a flat-color illustration loses its outer contour. |
 
 ## `gpt-image-2` size validation
 

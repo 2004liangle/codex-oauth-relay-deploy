@@ -78,6 +78,12 @@ background-removal models. Background removal is serialized to one CPU process
 at a time so two artifact workers do not load both models concurrently. It does
 not call a paid background-removal API.
 
+The helper locates the foreground with the selected model, releases the ONNX
+session, and applies Alpha Matting only to a bounded foreground crop. This
+preserves fine hair and removes light edge contamination without letting a
+large canvas exhaust the service memory limit. Oversized foreground crops use
+the bounded standard mask path instead.
+
 ## Local Handoff
 
 A trusted local agent can list attachments waiting for processing:
