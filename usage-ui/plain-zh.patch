@@ -1,3 +1,6 @@
+diff --git a/web/dist/.gitkeep b/web/dist/.gitkeep
+deleted file mode 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..0000000000000000000000000000000000000000
 diff --git a/web/index.html b/web/index.html
 index 932abd79f1045f1f8aaa9f24e606421a798b7cbd..0c8e7daee2b7153246226304d85ed8072de9e49c 100644
 --- a/web/index.html
@@ -750,6 +753,978 @@ index 7c3863ed4b47e6cff9ec3361dccedae432d8424b..d21c1b40868f7a680e60d5055df64be2
    })
  })
 
+diff --git a/web/src/components/usage/hooks/index.ts b/web/src/components/usage/hooks/index.ts
+index a887c8ca3decef75b1d903394bb154dc24b8cd9a..1b8edc37b655cd61f7c7d710f953aa274a4f2abc 100644
+--- a/web/src/components/usage/hooks/index.ts
++++ b/web/src/components/usage/hooks/index.ts
+@@ -9,3 +9,6 @@ export type { UsePricingDataOptions, UsePricingDataReturn } from './usePricingDa
+
+ export { useSparklines } from './useSparklines';
+ export type { SparklineData, SparklineBundle, UseSparklinesOptions, UseSparklinesReturn } from './useSparklines';
++
++export { useServerNetworkData } from './useServerNetworkData';
++export type { UseServerNetworkDataOptions, UseServerNetworkDataReturn } from './useServerNetworkData';
+diff --git a/web/src/components/usage/hooks/useServerNetworkData.test.ts b/web/src/components/usage/hooks/useServerNetworkData.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4bca6995c6af3b16a1a9c0c18e6e19c139e15a8
+--- /dev/null
++++ b/web/src/components/usage/hooks/useServerNetworkData.test.ts
+@@ -0,0 +1,22 @@
++import { readFileSync } from 'node:fs';
++import { describe, expect, it } from 'vitest';
++
++const source = readFileSync(new URL('./useServerNetworkData.ts', import.meta.url), 'utf8');
++
++describe('useServerNetworkData polling', () => {
++  it('uses separate two-second summary and one-minute history refresh loops', () => {
++    expect(source).toContain('const SUMMARY_REFRESH_INTERVAL_MS = 2_000;');
++    expect(source).toContain('const HISTORY_REFRESH_INTERVAL_MS = 60_000;');
++    expect(source).toContain('await loadSummary();');
++    expect(source).toContain('await loadHistory();');
++    expect(source).toContain('window.setTimeout(pollSummary, SUMMARY_REFRESH_INTERVAL_MS)');
++    expect(source).toContain('window.setTimeout(pollHistory, HISTORY_REFRESH_INTERVAL_MS)');
++  });
++
++  it('pauses requests while the page is hidden and aborts in-flight work', () => {
++    expect(source).toContain("document.addEventListener('visibilitychange', handleVisibilityChange)");
++    expect(source).toContain('if (!enabled || !pageVisible)');
++    expect(source).toContain('summaryControllerRef.current?.abort();');
++    expect(source).toContain('historyControllerRef.current?.abort();');
++  });
++});
+diff --git a/web/src/components/usage/hooks/useServerNetworkData.ts b/web/src/components/usage/hooks/useServerNetworkData.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f135910fce1c54b50d7c30786af4396389bef38
+--- /dev/null
++++ b/web/src/components/usage/hooks/useServerNetworkData.ts
+@@ -0,0 +1,133 @@
++import { useCallback, useEffect, useRef, useState } from 'react';
++import { ApiError, fetchServerNetwork, fetchServerNetworkHistory } from '@/lib/api';
++import type { ServerNetworkHistoryResponse, ServerNetworkSummaryResponse } from '@/lib/types';
++
++const SUMMARY_REFRESH_INTERVAL_MS = 2_000;
++const HISTORY_REFRESH_INTERVAL_MS = 60_000;
++
++export interface UseServerNetworkDataOptions {
++  enabled?: boolean;
++  onAuthRequired?: () => void;
++}
++
++export interface UseServerNetworkDataReturn {
++  summary: ServerNetworkSummaryResponse | null;
++  history: ServerNetworkHistoryResponse | null;
++  loading: boolean;
++  error: string;
++  loadNetwork: () => Promise<void>;
++}
++
++const isPageVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
++
++export function useServerNetworkData({
++  enabled = true,
++  onAuthRequired,
++}: UseServerNetworkDataOptions = {}): UseServerNetworkDataReturn {
++  const [summary, setSummary] = useState<ServerNetworkSummaryResponse | null>(null);
++  const [history, setHistory] = useState<ServerNetworkHistoryResponse | null>(null);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState('');
++  const [pageVisible, setPageVisible] = useState(isPageVisible);
++  const summaryControllerRef = useRef<AbortController | null>(null);
++  const historyControllerRef = useRef<AbortController | null>(null);
++  const onAuthRequiredRef = useRef(onAuthRequired);
++
++  useEffect(() => {
++    onAuthRequiredRef.current = onAuthRequired;
++  }, [onAuthRequired]);
++
++  useEffect(() => {
++    if (typeof document === 'undefined') return;
++    const handleVisibilityChange = () => setPageVisible(isPageVisible());
++    document.addEventListener('visibilitychange', handleVisibilityChange);
++    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
++  }, []);
++
++  const handleLoadError = useCallback((loadError: unknown) => {
++    if (loadError instanceof ApiError && loadError.status === 401) {
++      onAuthRequiredRef.current?.();
++      return;
++    }
++    setError(loadError instanceof Error ? loadError.message : 'Failed to load server network usage');
++  }, []);
++
++  const loadSummary = useCallback(async () => {
++    summaryControllerRef.current?.abort();
++    const controller = new AbortController();
++    summaryControllerRef.current = controller;
++    try {
++      const response = await fetchServerNetwork(controller.signal);
++      if (summaryControllerRef.current !== controller) return;
++      setSummary(response);
++      setError('');
++    } catch (loadError) {
++      if (!controller.signal.aborted) handleLoadError(loadError);
++    } finally {
++      if (summaryControllerRef.current === controller) summaryControllerRef.current = null;
++    }
++  }, [handleLoadError]);
++
++  const loadHistory = useCallback(async () => {
++    historyControllerRef.current?.abort();
++    const controller = new AbortController();
++    historyControllerRef.current = controller;
++    try {
++      const response = await fetchServerNetworkHistory('24h', controller.signal);
++      if (historyControllerRef.current !== controller) return;
++      setHistory(response);
++      setError('');
++    } catch (loadError) {
++      if (!controller.signal.aborted) handleLoadError(loadError);
++    } finally {
++      if (historyControllerRef.current === controller) historyControllerRef.current = null;
++    }
++  }, [handleLoadError]);
++
++  const loadNetwork = useCallback(async () => {
++    setLoading(true);
++    await Promise.all([loadSummary(), loadHistory()]);
++    setLoading(false);
++  }, [loadHistory, loadSummary]);
++
++  useEffect(() => {
++    if (!enabled || !pageVisible) {
++      summaryControllerRef.current?.abort();
++      historyControllerRef.current?.abort();
++      summaryControllerRef.current = null;
++      historyControllerRef.current = null;
++      setLoading(false);
++      return;
++    }
++
++    let cancelled = false;
++    let summaryTimer: ReturnType<typeof window.setTimeout> | null = null;
++    let historyTimer: ReturnType<typeof window.setTimeout> | null = null;
++
++    const pollSummary = async () => {
++      await loadSummary();
++      if (!cancelled) summaryTimer = window.setTimeout(pollSummary, SUMMARY_REFRESH_INTERVAL_MS);
++    };
++    const pollHistory = async () => {
++      await loadHistory();
++      if (!cancelled) historyTimer = window.setTimeout(pollHistory, HISTORY_REFRESH_INTERVAL_MS);
++    };
++
++    setLoading(true);
++    void Promise.all([pollSummary(), pollHistory()]).finally(() => {
++      if (!cancelled) setLoading(false);
++    });
++
++    return () => {
++      cancelled = true;
++      if (summaryTimer !== null) window.clearTimeout(summaryTimer);
++      if (historyTimer !== null) window.clearTimeout(historyTimer);
++      summaryControllerRef.current?.abort();
++      historyControllerRef.current?.abort();
++      summaryControllerRef.current = null;
++      historyControllerRef.current = null;
++    };
++  }, [enabled, loadHistory, loadSummary, pageVisible]);
++
++  return { summary, history, loading, error, loadNetwork };
++}
+diff --git a/web/src/components/usage/index.ts b/web/src/components/usage/index.ts
+index cd60d383b1588bb0fd39f97494398e053ce145bd..61b4e9180410ba40427ed532887e9b04ad8e9ff6 100644
+--- a/web/src/components/usage/index.ts
++++ b/web/src/components/usage/index.ts
+@@ -8,7 +8,9 @@ export { PriceSettingsCard } from './PriceSettingsCard';
+ export { AiProviderCredentialsSection, AuthFileCredentialsSection, CredentialProviderFilterBar, useCredentialsTabData } from './credentials';
+ export { RequestEventsDetailsCard } from './RequestEventsDetailsCard';
+ export { ServiceHealthCard } from './ServiceHealthCard';
++export { ServerNetworkPanel } from './network/ServerNetworkPanel';
+ export { useUsageData } from './hooks/useUsageData';
+ export { useOverviewRealtimeData } from './hooks/useOverviewRealtimeData';
+ export { usePricingData } from './hooks/usePricingData';
+ export { useSparklines } from './hooks/useSparklines';
++export { useServerNetworkData } from './hooks/useServerNetworkData';
+diff --git a/web/src/components/usage/network/ServerNetworkPanel.module.scss b/web/src/components/usage/network/ServerNetworkPanel.module.scss
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2332179880e6a853fd8081d561faabe5d435fbd
+--- /dev/null
++++ b/web/src/components/usage/network/ServerNetworkPanel.module.scss
+@@ -0,0 +1,366 @@
++.panel {
++  display: flex;
++  flex-direction: column;
++  gap: 18px;
++  min-width: 0;
++}
++
++.headingRow,
++.sectionHeader,
++.packageHeader,
++.packageMeta {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 14px;
++}
++
++.title,
++.sectionHeader h3,
++.packageHeader h3 {
++  margin: 0;
++  color: var(--text-primary);
++  letter-spacing: 0;
++}
++
++.title {
++  font-size: 20px;
++  line-height: 1.3;
++}
++
++.subtitle,
++.packageHeader p,
++.notice p {
++  margin: 5px 0 0;
++  color: var(--text-secondary);
++  font-size: 13px;
++  line-height: 1.55;
++}
++
++.statusCluster {
++  display: flex;
++  align-items: center;
++  justify-content: flex-end;
++  gap: 8px;
++  flex-wrap: wrap;
++}
++
++.statusPill,
++.interfacePill {
++  display: inline-flex;
++  align-items: center;
++  gap: 7px;
++  min-height: 30px;
++  padding: 0 10px;
++  border: 1px solid var(--border-color);
++  border-radius: 999px;
++  background: var(--bg-primary);
++  color: var(--text-secondary);
++  font-size: 12px;
++  white-space: nowrap;
++}
++
++.statusDot {
++  width: 7px;
++  height: 7px;
++  border-radius: 50%;
++  background: currentColor;
++}
++
++.statusLive {
++  color: #0f766e;
++  border-color: color-mix(in srgb, #0f766e 30%, var(--border-color));
++}
++
++.statusStale {
++  color: #b45309;
++  border-color: color-mix(in srgb, #b45309 30%, var(--border-color));
++}
++
++.statusUnavailable {
++  color: #b91c1c;
++  border-color: color-mix(in srgb, #b91c1c 30%, var(--border-color));
++}
++
++.errorBanner,
++.notice {
++  display: flex;
++  align-items: flex-start;
++  gap: 10px;
++  padding: 12px 14px;
++  border: 1px solid color-mix(in srgb, #dc2626 30%, var(--border-color));
++  border-radius: 8px;
++  background: color-mix(in srgb, #dc2626 7%, var(--bg-primary));
++  color: #b91c1c;
++  font-size: 13px;
++}
++
++.sectionHeader {
++  align-items: baseline;
++  margin-bottom: -8px;
++}
++
++.sectionHeader h3,
++.packageHeader h3 {
++  font-size: 15px;
++  line-height: 1.4;
++}
++
++.sectionHeader span {
++  color: var(--text-secondary);
++  font-size: 12px;
++}
++
++.metricGrid {
++  display: grid;
++  grid-template-columns: repeat(3, minmax(0, 1fr));
++  gap: 10px;
++}
++
++.metricCard {
++  position: relative;
++  display: flex;
++  flex-direction: column;
++  min-width: 0;
++  min-height: 112px;
++  padding: 15px 16px;
++  border: 1px solid var(--border-color);
++  border-radius: 8px;
++  background: var(--bg-primary);
++  overflow: hidden;
++
++  &::before {
++    position: absolute;
++    top: 0;
++    bottom: 0;
++    left: 0;
++    width: 3px;
++    content: '';
++    background: var(--metric-accent);
++  }
++}
++
++.receive { --metric-accent: #0891b2; }
++.send { --metric-accent: #ea580c; }
++.total { --metric-accent: #4b5563; }
++
++.metricLabel {
++  color: var(--text-secondary);
++  font-size: 12px;
++  line-height: 1.4;
++}
++
++.metricValue {
++  margin-top: 8px;
++  color: var(--text-primary);
++  font-size: 28px;
++  font-variant-numeric: tabular-nums;
++  line-height: 1.15;
++  overflow-wrap: anywhere;
++}
++
++.sinceBootBand {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 16px;
++  padding: 12px 14px;
++  border: 1px solid var(--border-color);
++  border-radius: 8px;
++  background: color-mix(in srgb, var(--bg-secondary) 54%, var(--bg-primary));
++}
++
++.sinceBootHeading {
++  display: flex;
++  align-items: center;
++  gap: 10px;
++  min-width: 0;
++}
++
++.sinceBootHeading h3 {
++  margin: 0;
++  color: var(--text-primary);
++  font-size: 13px;
++  letter-spacing: 0;
++}
++
++.sinceBootHeading p {
++  margin: 3px 0 0;
++  color: var(--text-secondary);
++  font-size: 11px;
++  line-height: 1.45;
++}
++
++.sinceBootValues {
++  display: flex;
++  align-items: center;
++  justify-content: flex-end;
++  gap: 14px;
++  color: var(--text-secondary);
++  font-size: 11px;
++  white-space: nowrap;
++}
++
++.sinceBootValues strong {
++  color: var(--text-primary);
++  font-variant-numeric: tabular-nums;
++}
++
++.resetCount {
++  flex: 0 0 auto;
++  padding: 3px 7px;
++  border-radius: 999px;
++  background: color-mix(in srgb, #b45309 10%, var(--bg-primary));
++  color: #b45309;
++  font-size: 10px;
++  white-space: nowrap;
++}
++
++.metricDetail {
++  margin-top: auto;
++  padding-top: 8px;
++  color: var(--text-secondary);
++  font-size: 11px;
++  font-variant-numeric: tabular-nums;
++}
++
++.packageBand,
++.chartSection {
++  padding: 16px;
++  border: 1px solid var(--border-color);
++  border-radius: 8px;
++  background: var(--bg-primary);
++}
++
++.packageHeader strong {
++  color: var(--text-primary);
++  font-size: 14px;
++  font-variant-numeric: tabular-nums;
++  text-align: right;
++}
++
++.packageHeader .packageUnset {
++  color: var(--text-secondary);
++  font-weight: 600;
++}
++
++.progressTrack {
++  height: 9px;
++  margin-top: 15px;
++  border-radius: 999px;
++  background: color-mix(in srgb, var(--border-color) 70%, var(--bg-secondary));
++  overflow: hidden;
++
++  span {
++    display: block;
++    height: 100%;
++    border-radius: inherit;
++    background: #0f766e;
++    transition: width 0.25s ease;
++  }
++}
++
++.packageMeta {
++  margin-top: 9px;
++  color: var(--text-secondary);
++  font-size: 11px;
++  font-variant-numeric: tabular-nums;
++  flex-wrap: wrap;
++}
++
++.chartSection {
++  min-width: 0;
++}
++
++.chartSection .sectionHeader {
++  margin-bottom: 12px;
++}
++
++.chartFrame {
++  position: relative;
++  width: 100%;
++  height: 320px;
++}
++
++.chartEmpty {
++  position: absolute;
++  inset: 42px 0 0;
++  display: grid;
++  place-items: center;
++  color: var(--text-secondary);
++  font-size: 13px;
++  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
++}
++
++.notice {
++  color: var(--text-secondary);
++  border-color: color-mix(in srgb, #0284c7 28%, var(--border-color));
++  background: color-mix(in srgb, #0284c7 6%, var(--bg-primary));
++}
++
++.notice svg {
++  flex: 0 0 auto;
++  margin-top: 2px;
++  color: #0284c7;
++}
++
++.notice strong {
++  color: var(--text-primary);
++  font-size: 13px;
++}
++
++@media (max-width: 768px) {
++  .headingRow,
++  .packageHeader {
++    align-items: flex-start;
++    flex-direction: column;
++  }
++
++  .statusCluster {
++    justify-content: flex-start;
++  }
++
++  .metricGrid {
++    grid-template-columns: 1fr;
++  }
++
++  .metricCard {
++    min-height: 102px;
++  }
++
++  .metricValue {
++    font-size: 23px;
++  }
++
++  .sinceBootBand,
++  .sinceBootHeading,
++  .sinceBootValues {
++    align-items: flex-start;
++    flex-direction: column;
++  }
++
++  .sinceBootValues {
++    gap: 5px;
++    white-space: normal;
++  }
++
++  .sectionHeader {
++    align-items: flex-start;
++    flex-direction: column;
++    gap: 3px;
++  }
++
++  .packageHeader strong {
++    text-align: left;
++  }
++
++  .packageMeta {
++    align-items: flex-start;
++    flex-direction: column;
++    gap: 4px;
++  }
++
++  .chartFrame {
++    height: 270px;
++  }
++}
+diff --git a/web/src/components/usage/network/ServerNetworkPanel.test.tsx b/web/src/components/usage/network/ServerNetworkPanel.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e622838d074074285ff3542f877577e20e6869c
+--- /dev/null
++++ b/web/src/components/usage/network/ServerNetworkPanel.test.tsx
+@@ -0,0 +1,65 @@
++import { createElement } from 'react';
++import { describe, expect, it } from 'vitest';
++import { renderToStaticMarkup } from 'react-dom/server';
++import '@/i18n';
++import type { ServerNetworkSummaryResponse } from '@/lib/types';
++import { formatNetworkBytes, formatNetworkRate, ServerNetworkPanel } from './ServerNetworkPanel';
++
++const summary: ServerNetworkSummaryResponse = {
++  generated_at: '2026-07-18T12:00:00Z',
++  stale: false,
++  interface: 'eth0',
++  monitor_started_at: '2026-07-18T11:00:00Z',
++  current: { rx_bytes_per_sec: 1_000_000, tx_bytes_per_sec: 2_000_000, total_bytes_per_sec: 3_000_000 },
++  peak: { rx_bytes_per_sec: 4_000_000, tx_bytes_per_sec: 5_000_000, total_bytes_per_sec: 9_000_000 },
++  monitored: { rx_bytes: 3_000_000_000, tx_bytes: 2_000_000_000, total_bytes: 5_000_000_000 },
++  since_boot: { rx_bytes: 9_000_000_000, tx_bytes: 8_000_000_000, total_bytes: 17_000_000_000 },
++  package: {
++    configured: true,
++    total_bytes: 100_000_000_000,
++    used_bytes: 25_000_000_000,
++    remaining_bytes: 75_000_000_000,
++    percent: 25,
++    start_at: '2026-07-01T00:00:00Z',
++    end_at: '2026-07-31T23:59:59Z',
++  },
++  reset_count: 0,
++};
++
++describe('ServerNetworkPanel formatting', () => {
++  it('uses decimal traffic units and network bit-rate units', () => {
++    expect(formatNetworkBytes(1_000_000_000)).toBe('1.00 GB');
++    expect(formatNetworkRate(1_000_000)).toBe('8.00 Mbps');
++  });
++
++  it('renders live, accumulated, package, and estimate sections', () => {
++    const html = renderToStaticMarkup(createElement(ServerNetworkPanel, {
++      summary,
++      history: { generated_at: summary.generated_at, range: '24h', points: [] },
++      loading: false,
++      isDark: false,
++      isMobile: false,
++    }));
++
++    expect(html).toContain('Server network traffic');
++    expect(html).toContain('8.00 Mbps');
++    expect(html).toContain('25.0%');
++    expect(html).toContain('Local interface estimate');
++    expect(html).toContain('Traffic since this system boot');
++    expect(html).toContain('17.0 GB');
++  });
++
++  it('keeps an over-quota percentage visible while limiting the progress bar width', () => {
++    const html = renderToStaticMarkup(createElement(ServerNetworkPanel, {
++      summary: { ...summary, package: { ...summary.package, percent: 125, used_bytes: 125_000_000_000, remaining_bytes: 0 } },
++      history: null,
++      loading: false,
++      isDark: false,
++      isMobile: false,
++    }));
++
++    expect(html).toContain('125.0%');
++    expect(html).toContain('aria-valuenow="100"');
++    expect(html).toContain('width:100%');
++  });
++});
+diff --git a/web/src/components/usage/network/ServerNetworkPanel.tsx b/web/src/components/usage/network/ServerNetworkPanel.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..068b149c580bfe10f325dd53adfd013904b4cb61
+--- /dev/null
++++ b/web/src/components/usage/network/ServerNetworkPanel.tsx
+@@ -0,0 +1,331 @@
++import { useMemo } from 'react';
++import { useTranslation } from 'react-i18next';
++import type { ChartData, ChartOptions } from 'chart.js';
++import { Line } from 'react-chartjs-2';
++import type { ServerNetworkHistoryResponse, ServerNetworkSummaryResponse } from '@/lib/types';
++import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
++import { IconCircleAlert, IconInfo } from '@/components/ui/icons';
++import styles from './ServerNetworkPanel.module.scss';
++
++export interface ServerNetworkPanelProps {
++  summary: ServerNetworkSummaryResponse | null;
++  history: ServerNetworkHistoryResponse | null;
++  loading: boolean;
++  error?: string;
++  isDark: boolean;
++  isMobile: boolean;
++}
++
++const DECIMAL_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const;
++
++const safeNumber = (value: number | null | undefined) => (
++  typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0
++);
++
++export function formatNetworkBytes(value: number): string {
++  let amount = safeNumber(value);
++  let unitIndex = 0;
++  while (amount >= 1000 && unitIndex < DECIMAL_UNITS.length - 1) {
++    amount /= 1000;
++    unitIndex += 1;
++  }
++  const digits = amount >= 100 || unitIndex === 0 ? 0 : amount >= 10 ? 1 : 2;
++  return `${amount.toFixed(digits)} ${DECIMAL_UNITS[unitIndex]}`;
++}
++
++export function formatNetworkRate(bytesPerSecond: number): string {
++  const bitsPerSecond = safeNumber(bytesPerSecond) * 8;
++  if (bitsPerSecond >= 1_000_000_000) return `${(bitsPerSecond / 1_000_000_000).toFixed(2)} Gbps`;
++  if (bitsPerSecond >= 1_000_000) return `${(bitsPerSecond / 1_000_000).toFixed(2)} Mbps`;
++  if (bitsPerSecond >= 1_000) return `${(bitsPerSecond / 1_000).toFixed(1)} Kbps`;
++  return `${Math.round(bitsPerSecond)} bps`;
++}
++
++function formatChartRate(bytesPerSecond: number): string {
++  const mbps = safeNumber(bytesPerSecond) * 8 / 1_000_000;
++  if (mbps >= 10) return mbps.toFixed(1);
++  return mbps.toFixed(2);
++}
++
++function formatDateTime(value: string | null | undefined, language: string): string {
++  if (!value) return '--';
++  const date = new Date(value);
++  if (Number.isNaN(date.getTime())) return '--';
++  return date.toLocaleString(language, {
++    month: '2-digit',
++    day: '2-digit',
++    hour: '2-digit',
++    minute: '2-digit',
++    second: '2-digit',
++    hour12: false,
++  });
++}
++
++function MetricCard({
++  label,
++  value,
++  detail,
++  tone,
++}: {
++  label: string;
++  value: string;
++  detail?: string;
++  tone: 'receive' | 'send' | 'total';
++}) {
++  return (
++    <div className={`${styles.metricCard} ${styles[tone]}`.trim()}>
++      <span className={styles.metricLabel}>{label}</span>
++      <strong className={styles.metricValue}>{value}</strong>
++      {detail && <span className={styles.metricDetail}>{detail}</span>}
++    </div>
++  );
++}
++
++function NetworkChart({
++  history,
++  isDark,
++  isMobile,
++}: {
++  history: ServerNetworkHistoryResponse | null;
++  isDark: boolean;
++  isMobile: boolean;
++}) {
++  const { t, i18n } = useTranslation();
++  const points = useMemo(() => history?.points ?? [], [history?.points]);
++  const labels = useMemo(() => points.map((point) => {
++    const date = new Date(point.timestamp);
++    if (Number.isNaN(date.getTime())) return '--';
++    return date.toLocaleTimeString(i18n.resolvedLanguage ?? i18n.language, {
++      hour: '2-digit',
++      minute: '2-digit',
++      hour12: false,
++    });
++  }), [i18n.language, i18n.resolvedLanguage, points]);
++
++  const chartData = useMemo<ChartData<'line', number[], string>>(() => ({
++    labels,
++    datasets: [
++      {
++        label: t('usage_stats.network_receive'),
++        data: points.map((point) => safeNumber(point.rx_bytes_per_sec) * 8 / 1_000_000),
++        borderColor: '#0891b2',
++        backgroundColor: 'rgba(8, 145, 178, 0.12)',
++        borderWidth: isMobile ? 1.5 : 2,
++        pointRadius: 0,
++        pointHoverRadius: 3,
++        tension: 0.28,
++        fill: true,
++      },
++      {
++        label: t('usage_stats.network_send'),
++        data: points.map((point) => safeNumber(point.tx_bytes_per_sec) * 8 / 1_000_000),
++        borderColor: '#ea580c',
++        backgroundColor: 'rgba(234, 88, 12, 0.08)',
++        borderWidth: isMobile ? 1.5 : 2,
++        pointRadius: 0,
++        pointHoverRadius: 3,
++        tension: 0.28,
++        fill: true,
++      },
++    ],
++  }), [isMobile, labels, points, t]);
++
++  const chartOptions = useMemo<ChartOptions<'line'>>(() => {
++    const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(17, 24, 39, 0.08)';
++    const tickColor = isDark ? 'rgba(255, 255, 255, 0.68)' : 'rgba(17, 24, 39, 0.68)';
++    const tooltipText = isDark ? '#ffffff' : '#111827';
++    return {
++      responsive: true,
++      maintainAspectRatio: false,
++      interaction: { mode: 'index', intersect: false },
++      animation: { duration: 180 },
++      plugins: {
++        legend: {
++          position: 'top',
++          align: 'end',
++          labels: { color: tickColor, boxWidth: 12, boxHeight: 3, usePointStyle: true },
++        },
++        tooltip: {
++          backgroundColor: isDark ? 'rgba(17, 24, 39, 0.96)' : 'rgba(255, 255, 255, 0.98)',
++          titleColor: tooltipText,
++          bodyColor: tooltipText,
++          borderColor: gridColor,
++          borderWidth: 1,
++          callbacks: {
++            label: (context) => `${context.dataset.label}: ${Number(context.parsed.y ?? 0).toFixed(2)} Mbps`,
++          },
++        },
++      },
++      scales: {
++        x: {
++          grid: { display: false },
++          border: { color: gridColor },
++          ticks: { color: tickColor, maxTicksLimit: isMobile ? 5 : 10, font: { size: isMobile ? 10 : 11 } },
++        },
++        y: {
++          beginAtZero: true,
++          grid: { color: gridColor },
++          border: { color: gridColor },
++          title: { display: !isMobile, text: 'Mbps', color: tickColor },
++          ticks: { color: tickColor, callback: (value) => formatChartRate(Number(value) * 1_000_000 / 8) },
++        },
++      },
++    };
++  }, [isDark, isMobile]);
++
++  return (
++    <div className={styles.chartFrame} aria-label={t('usage_stats.network_chart_title')}>
++      <Line data={chartData} options={chartOptions} />
++      {points.length === 0 && (
++        <div className={styles.chartEmpty}>{t('usage_stats.network_chart_empty')}</div>
++      )}
++    </div>
++  );
++}
++
++export function ServerNetworkPanel({
++  summary,
++  history,
++  loading,
++  error,
++  isDark,
++  isMobile,
++}: ServerNetworkPanelProps) {
++  const { t, i18n } = useTranslation();
++  const language = i18n.resolvedLanguage ?? i18n.language;
++  const packageUsage = summary?.package;
++  const packagePercent = safeNumber(packageUsage?.percent);
++  const packageBarPercent = Math.min(100, packagePercent);
++  const packageConfigured = packageUsage?.configured === true && safeNumber(packageUsage.total_bytes) > 0;
++  const initialLoading = !summary && (loading || !error);
++
++  return (
++    <section className={styles.panel} aria-labelledby="server-network-title">
++      <div className={styles.headingRow}>
++        <div>
++          <h2 id="server-network-title" className={styles.title}>{t('usage_stats.network_title')}</h2>
++          <p className={styles.subtitle}>{t('usage_stats.network_subtitle')}</p>
++        </div>
++        <div className={styles.statusCluster}>
++          {initialLoading ? (
++            <span className={styles.statusPill}><LoadingSpinner size={12} />{t('common.loading')}</span>
++          ) : summary ? (
++            <span className={`${styles.statusPill} ${summary?.stale ? styles.statusStale : styles.statusLive}`.trim()}>
++              <span className={styles.statusDot} aria-hidden="true" />
++              {summary?.stale ? t('usage_stats.network_status_stale') : t('usage_stats.network_status_live')}
++            </span>
++          ) : (
++            <span className={`${styles.statusPill} ${styles.statusUnavailable}`.trim()}>
++              <span className={styles.statusDot} aria-hidden="true" />
++              {t('usage_stats.network_status_unavailable')}
++            </span>
++          )}
++          <span className={styles.interfacePill}>{t('usage_stats.network_interface')}: {summary?.interface || '--'}</span>
++        </div>
++      </div>
++
++      {error && (
++        <div className={styles.errorBanner} role="alert">
++          <IconCircleAlert size={16} />
++          <span>{t('usage_stats.network_load_failed')}</span>
++        </div>
++      )}
++
++      <div className={styles.sectionHeader}>
++        <h3>{t('usage_stats.network_realtime_title')}</h3>
++        <span>{t('usage_stats.network_refresh_hint')}</span>
++      </div>
++      <div className={styles.metricGrid} aria-live="polite">
++        <MetricCard
++          tone="receive"
++          label={t('usage_stats.network_receive_speed')}
++          value={summary ? formatNetworkRate(summary.current.rx_bytes_per_sec) : '--'}
++          detail={`${t('usage_stats.network_peak')}: ${summary ? formatNetworkRate(summary.peak.rx_bytes_per_sec) : '--'}`}
++        />
++        <MetricCard
++          tone="send"
++          label={t('usage_stats.network_send_speed')}
++          value={summary ? formatNetworkRate(summary.current.tx_bytes_per_sec) : '--'}
++          detail={`${t('usage_stats.network_peak')}: ${summary ? formatNetworkRate(summary.peak.tx_bytes_per_sec) : '--'}`}
++        />
++        <MetricCard
++          tone="total"
++          label={t('usage_stats.network_total_speed')}
++          value={summary ? formatNetworkRate(summary.current.total_bytes_per_sec) : '--'}
++          detail={`${t('usage_stats.network_peak')}: ${summary ? formatNetworkRate(summary.peak.total_bytes_per_sec) : '--'}`}
++        />
++      </div>
++
++      <div className={styles.sectionHeader}>
++        <h3>{t('usage_stats.network_accumulated_title')}</h3>
++        <span>{t('usage_stats.network_started_at')}: {formatDateTime(summary?.monitor_started_at, language)}</span>
++      </div>
++      <div className={styles.metricGrid}>
++        <MetricCard tone="receive" label={t('usage_stats.network_received')} value={summary ? formatNetworkBytes(summary.monitored.rx_bytes) : '--'} />
++        <MetricCard tone="send" label={t('usage_stats.network_sent')} value={summary ? formatNetworkBytes(summary.monitored.tx_bytes) : '--'} />
++        <MetricCard tone="total" label={t('usage_stats.network_total')} value={summary ? formatNetworkBytes(summary.monitored.total_bytes) : '--'} />
++      </div>
++
++      <div className={styles.sinceBootBand}>
++        <div className={styles.sinceBootHeading}>
++          <div>
++            <h3>{t('usage_stats.network_since_boot_title')}</h3>
++            <p>{t('usage_stats.network_since_boot_hint')}</p>
++          </div>
++          {summary && summary.reset_count > 0 && (
++            <span className={styles.resetCount}>{t('usage_stats.network_counter_reset', { count: summary.reset_count })}</span>
++          )}
++        </div>
++        <div className={styles.sinceBootValues}>
++          <span>{t('usage_stats.network_receive')}: <strong>{summary ? formatNetworkBytes(summary.since_boot.rx_bytes) : '--'}</strong></span>
++          <span>{t('usage_stats.network_send')}: <strong>{summary ? formatNetworkBytes(summary.since_boot.tx_bytes) : '--'}</strong></span>
++          <span>{t('usage_stats.network_total')}: <strong>{summary ? formatNetworkBytes(summary.since_boot.total_bytes) : '--'}</strong></span>
++        </div>
++      </div>
++
++      <div className={styles.packageBand}>
++        <div className={styles.packageHeader}>
++          <div>
++            <h3>{t('usage_stats.network_package_title')}</h3>
++            <p>{t('usage_stats.network_package_outbound_hint')}</p>
++          </div>
++          {packageConfigured ? (
++            <strong>{formatNetworkBytes(packageUsage.used_bytes)} / {formatNetworkBytes(packageUsage.total_bytes)}</strong>
++          ) : (
++            <strong className={styles.packageUnset}>{t('usage_stats.network_package_unconfigured')}</strong>
++          )}
++        </div>
++        {packageConfigured && (
++          <>
++            <div className={styles.progressTrack} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={packageBarPercent}>
++              <span style={{ width: `${packageBarPercent}%` }} />
++            </div>
++            <div className={styles.packageMeta}>
++              <span>{t('usage_stats.network_package_used')}: {packagePercent.toFixed(1)}%</span>
++              <span>{t('usage_stats.network_package_remaining')}: {formatNetworkBytes(packageUsage.remaining_bytes)}</span>
++              {(packageUsage.start_at || packageUsage.end_at) && (
++                <span>{formatDateTime(packageUsage.start_at, language)} - {formatDateTime(packageUsage.end_at, language)}</span>
++              )}
++            </div>
++          </>
++        )}
++      </div>
++
++      <div className={styles.chartSection}>
++        <div className={styles.sectionHeader}>
++          <h3>{t('usage_stats.network_chart_title')}</h3>
++          <span>{t('usage_stats.network_chart_subtitle')}</span>
++        </div>
++        <NetworkChart history={history} isDark={isDark} isMobile={isMobile} />
++      </div>
++
++      <div className={styles.notice}>
++        <IconInfo size={17} />
++        <div>
++          <strong>{t('usage_stats.network_estimate_title')}</strong>
++          <p>{t('usage_stats.network_estimate_notice')}</p>
++        </div>
++      </div>
++    </section>
++  );
++}
 diff --git a/web/src/components/usage/test/PriceSettingsCard.test.tsx b/web/src/components/usage/test/PriceSettingsCard.test.tsx
 index 0a8882ddc6de0e7df2fd75e7adf4c7cbd6955703..8d9be9c7564282329dcf770fa2cdb112d68588bb 100644
 --- a/web/src/components/usage/test/PriceSettingsCard.test.tsx
@@ -880,7 +1855,7 @@ index e0654c9f021645b50fce68ebbde325ebd82f8b44..7c8d7458d813854c49207ef788339a7e
      document.body.innerHTML = '';
      vi.unstubAllGlobals();
 diff --git a/web/src/i18n/index.test.ts b/web/src/i18n/index.test.ts
-index a95089e30c21f4e4a54635357f844b5adf72a6d0..5cd1674d2fc6a6239d4f6ce2b3e73e02ae112f87 100644
+index a95089e30c21f4e4a54635357f844b5adf72a6d0..7ce1fc34e1cc2ff79ba022383fdc7110f99fba8c 100644
 --- a/web/src/i18n/index.test.ts
 +++ b/web/src/i18n/index.test.ts
 @@ -20,12 +20,12 @@ describe('i18n resources', () => {
@@ -1045,7 +2020,7 @@ index a95089e30c21f4e4a54635357f844b5adf72a6d0..5cd1674d2fc6a6239d4f6ce2b3e73e02
      expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.overview_realtime_trend')).toBe('趨勢');
    });
 
-@@ -214,7 +214,7 @@ describe('i18n resources', () => {
+@@ -214,12 +214,20 @@ describe('i18n resources', () => {
      const zh = i18n.getResourceBundle('zh', 'translation');
      const zhTW = i18n.getResourceBundle('zh-TW', 'translation');
 
@@ -1054,7 +2029,20 @@ index a95089e30c21f4e4a54635357f844b5adf72a6d0..5cd1674d2fc6a6239d4f6ce2b3e73e02
      expect(zhTW.usage_stats.tab_analysis).toBe('分析');
      expect(JSON.stringify(zh)).not.toMatch(/该 key|当前 key|完整 key|打开 Key 概览|API-Key|凭证的只读|当前凭证/);
      expect(JSON.stringify(zhTW)).not.toMatch(/該 key|目前 key|完整 key|開啟 Key 總覽|API-Key|金鑰的唯讀|目前金鑰/);
-@@ -250,7 +250,7 @@ describe('i18n resources', () => {
+   });
+
++  it('keeps server traffic labels understandable in every language', () => {
++    expect(i18n.getResource('en', 'translation', 'usage_stats.tab_network')).toBe('Server Traffic');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.tab_network')).toBe('服务器流量');
++    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.tab_network')).toBe('伺服器流量');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.network_package_unconfigured')).toBe('还没有设置流量包额度');
++    expect(i18n.getResource('zh', 'translation', 'usage_stats.network_estimate_notice')).toContain('云服务商后台为准');
++  });
++
+   it('uses direct API Key error wording in every language', () => {
+     expect(i18n.getResource('en', 'translation', 'auth.invalid_api_key')).toBe('API Key is incorrect');
+     expect(i18n.getResource('zh', 'translation', 'auth.invalid_api_key')).toBe('API Key 错误');
+@@ -250,7 +258,7 @@ describe('i18n resources', () => {
 
    it('labels reached-limit Auth Files inspection results in every language', () => {
      expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_inspection_limit_reached')).toBe('Limit reached');
@@ -1063,7 +2051,7 @@ index a95089e30c21f4e4a54635357f844b5adf72a6d0..5cd1674d2fc6a6239d4f6ce2b3e73e02
      expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_inspection_limit_reached')).toBe('達到限額');
    });
 
-@@ -264,14 +264,14 @@ describe('i18n resources', () => {
+@@ -264,14 +272,14 @@ describe('i18n resources', () => {
      expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_quota_reset_message_prompt')).toBe('Consume 1 credit to reset now?')
      expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_quota_reset_confirm')).toBe('Reset')
      expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_quota_reset_failed')).toBe('Quota reset failed. Please try again later.')
@@ -1084,7 +2072,7 @@ index a95089e30c21f4e4a54635357f844b5adf72a6d0..5cd1674d2fc6a6239d4f6ce2b3e73e02
      expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_title')).toBe('重置 Codex 限額')
      expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_button')).toBe('重置限額，可用 {{count}} 次')
      expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_tooltip_suffix')).toBe('次重置機會')
-@@ -284,7 +284,7 @@ describe('i18n resources', () => {
+@@ -284,7 +292,7 @@ describe('i18n resources', () => {
 
    it('keeps the login product title aligned across languages', () => {
      expect(i18n.getResourceBundle('en', 'translation').auth.login_title).toBe('CPA Usage Statistics Dashboard');
@@ -1094,7 +2082,7 @@ index a95089e30c21f4e4a54635357f844b5adf72a6d0..5cd1674d2fc6a6239d4f6ce2b3e73e02
    });
  });
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9acbfe0f9df 100644
+index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..22c71b8293260d27c4a60d2b93ab04fff54206b6 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -2,7 +2,7 @@ import i18n from 'i18next';
@@ -1106,7 +2094,55 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
  export const SUPPORTED_LANGUAGES = ['en', 'zh', 'zh-TW'] as const;
 
  export type SupportedLanguage = (typeof SUPPORTED_LANGUAGES)[number];
-@@ -145,6 +145,10 @@ const resources = {
+@@ -104,6 +104,7 @@ const resources = {
+         tab_ai_provider: 'AI Provider',
+         tab_settings: 'Settings',
+         tab_pricing: 'Pricing',
++        tab_network: 'Server Traffic',
+         range_filter: 'Range',
+         api_key_filter: 'API Key',
+         api_key_filter_all: 'All',
+@@ -122,6 +123,39 @@ const resources = {
+         custom_invalid: 'Start date must be earlier than or equal to end date',
+         custom_incomplete: 'Select both start and end dates to apply a custom range',
+         no_data: 'No Data',
++        network_title: 'Server network traffic',
++        network_subtitle: 'Live speed and traffic measured on this server network interface.',
++        network_status_live: 'Collecting live',
++        network_status_stale: 'Data delayed',
++        network_status_unavailable: 'No live data',
++        network_interface: 'Interface',
++        network_load_failed: 'Unable to load server network traffic. Existing values may be out of date.',
++        network_realtime_title: 'Live bandwidth',
++        network_refresh_hint: 'Updates about every 2 seconds',
++        network_receive: 'Received',
++        network_send: 'Sent',
++        network_receive_speed: 'Receiving now',
++        network_send_speed: 'Sending now',
++        network_total_speed: 'Combined now',
++        network_peak: 'Peak',
++        network_accumulated_title: 'Traffic since monitoring started',
++        network_started_at: 'Started',
++        network_received: 'Total received',
++        network_sent: 'Total sent',
++        network_total: 'Combined traffic',
++        network_since_boot_title: 'Traffic since this system boot',
++        network_since_boot_hint: 'Raw interface counters for reference only; this is not the purchased package bill.',
++        network_counter_reset: 'Counter reset {{count}} time(s)',
++        network_package_title: 'Purchased traffic package',
++        network_package_outbound_hint: 'Package progress uses server outbound traffic (sent data).',
++        network_package_unconfigured: 'Package quota not configured',
++        network_package_used: 'Used',
++        network_package_remaining: 'Remaining',
++        network_chart_title: 'Bandwidth over the last 24 hours',
++        network_chart_subtitle: 'Receive and send speed in Mbps',
++        network_chart_empty: 'Waiting for bandwidth history',
++        network_estimate_title: 'Local interface estimate',
++        network_estimate_notice: 'This includes all traffic through the selected interface, such as API calls, SSH, updates, and file transfers. It may differ from your cloud provider bill; use the provider console as the final package total.',
+         overview_realtime_section_title: 'Realtime Metrics',
+         overview_realtime_window: 'Realtime window',
+         overview_realtime_token_velocity: 'Token Velocity',
+@@ -145,6 +179,10 @@ const resources = {
          overview_realtime_cache_empty: 'No calculable cache rate',
          overview_realtime_usage_empty: 'No token share data',
          overview_realtime_rolling_metric_hint: 'Latest, average and trend use rolling aggregation for the selected window.',
@@ -1117,7 +2153,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          overview_realtime_tokens_label: 'Tokens',
          overview_realtime_requests_label: 'Requests',
          overview_realtime_cost_label: 'Cost',
-@@ -169,11 +173,16 @@ const resources = {
+@@ -169,11 +207,16 @@ const resources = {
          ttft_hint: 'Time to First Token',
          speed: 'Speed',
          speed_hint: 'Average visible output tokens per second after TTFT',
@@ -1134,7 +2170,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          request_endpoint: 'Endpoint',
          cache_rate: 'Cache Rate',
          cache_read_tokens: 'Cache Read',
-@@ -181,6 +190,13 @@ const resources = {
+@@ -181,6 +224,13 @@ const resources = {
          reasoning_tokens: 'Reasoning',
          reasoning_effort: 'Effort',
          reasoning_effort_hint: 'Reasoning Effort',
@@ -1148,7 +2184,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          rpm: 'RPM',
          tpm: 'TPM',
          rpm_30m: 'RPM (30m)',
-@@ -389,6 +405,19 @@ const resources = {
+@@ -389,6 +439,19 @@ const resources = {
          credentials_quota_usage_mode_aria: 'Quota usage display mode',
          credentials_quota_usage_mode_current: 'Current',
          credentials_quota_usage_mode_estimated: 'Estimated',
@@ -1168,7 +2204,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          credentials_last_used: 'Last used',
          credentials_stats_updated: 'Stats updated',
          credentials_health_last_5h: 'Last 5h',
-@@ -475,6 +504,9 @@ const resources = {
+@@ -475,6 +538,9 @@ const resources = {
          model_price_cache_read: 'Cache Read',
          model_price_cache_write: 'Cache Write',
          model_price_multiplier: 'Multiplier',
@@ -1178,7 +2214,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          saved_prices: 'Saved Prices',
          model_price_empty: 'No saved prices',
          model_price_save_success: 'Model price saved.',
-@@ -493,6 +525,11 @@ const resources = {
+@@ -493,6 +559,11 @@ const resources = {
          model_price_sync_unmatched: 'Unmatched',
          model_price_sync_matched_model: 'Matched: {{model}}',
          model_price_sync_provider: 'Provider: {{provider}} ({{id}})',
@@ -1190,7 +2226,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          model_price_sync_existing: 'Current',
          model_price_sync_toggle: 'Select {{model}}',
          model_price_sync_select_all: 'Select all',
-@@ -576,27 +613,27 @@ const resources = {
+@@ -576,27 +647,27 @@ const resources = {
          no_requests: '暂无请求'
        },
        auth: {
@@ -1234,7 +2270,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          invalid_password: '密码错误',
          invalid_api_key: 'API Key 错误',
          login_rate_limited: '尝试次数过多，请稍后再试。',
-@@ -605,9 +642,9 @@ const resources = {
+@@ -605,9 +676,9 @@ const resources = {
          session_expired: '登录状态已失效，请重新登录。'
        },
        key_overview: {
@@ -1247,7 +2283,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          tabs_aria_label: 'API Key 概览分区',
          identity_unknown: '当前 API Key',
          logout: '退出登录',
-@@ -615,7 +652,7 @@ const resources = {
+@@ -615,7 +686,7 @@ const resources = {
          rate_limited: '概览刷新过于频繁，请稍候再试。'
        },
        usage_stats: {
@@ -1256,7 +2292,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          refresh: '刷新',
          sync_now: '立即同步',
          check_updates: '检查更新',
-@@ -633,14 +670,14 @@ const resources = {
+@@ -633,14 +704,15 @@ const resources = {
          back_to_cpa: '返回CPA',
          back_to_cpa_aria: '返回CPA管理界面',
          tabs_aria_label: '用量页面分区',
@@ -1275,11 +2311,12 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
 +        tab_ai_provider: '服务商账号',
 +        tab_settings: '后台设置',
 +        tab_pricing: '价格设置',
++        tab_network: '服务器流量',
 +        range_filter: '查看时间',
          api_key_filter: 'API Key',
          api_key_filter_all: '全部',
          range_all: '全部',
-@@ -658,73 +695,89 @@ const resources = {
+@@ -658,73 +730,122 @@ const resources = {
          custom_invalid: '开始日期不能晚于结束日期',
          custom_incomplete: '请选择完整的开始和结束日期',
          no_data: '暂无数据',
@@ -1307,6 +2344,39 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
 -        overview_realtime_usage_empty: '暂无使用占比数据',
 -        overview_realtime_rolling_metric_hint: '当前值、均值和趋势均基于所选窗口的滑动聚合。',
 -        overview_realtime_tokens_label: 'Tokens',
++        network_title: '服务器流量',
++        network_subtitle: '查看这台服务器当前网速，以及开启监控后累计用了多少流量。',
++        network_status_live: '正在实时统计',
++        network_status_stale: '数据有延迟',
++        network_status_unavailable: '暂无实时数据',
++        network_interface: '网卡',
++        network_load_failed: '服务器流量加载失败，页面上的旧数据可能已经过时。',
++        network_realtime_title: '当前网速',
++        network_refresh_hint: '大约每 2 秒更新一次',
++        network_receive: '接收',
++        network_send: '发送',
++        network_receive_speed: '当前接收速度',
++        network_send_speed: '当前发送速度',
++        network_total_speed: '当前总速度',
++        network_peak: '最高速度',
++        network_accumulated_title: '开启监控后的累计流量',
++        network_started_at: '开始统计时间',
++        network_received: '累计接收',
++        network_sent: '累计发送',
++        network_total: '收发合计',
++        network_since_boot_title: '本次系统启动后的网卡总流量',
++        network_since_boot_hint: '这是网卡原始计数，仅供参考，不代表流量包计费用量。',
++        network_counter_reset: '计数已重新开始 {{count}} 次',
++        network_package_title: '已购流量包',
++        network_package_outbound_hint: '流量包进度按服务器向外发送的流量计算。',
++        network_package_unconfigured: '还没有设置流量包额度',
++        network_package_used: '已使用',
++        network_package_remaining: '还剩',
++        network_chart_title: '最近 24 小时网速',
++        network_chart_subtitle: '接收和发送速度，单位 Mbps',
++        network_chart_empty: '正在等待网速记录',
++        network_estimate_title: '这是本机网卡流量估算',
++        network_estimate_notice: '这里会统计经过这张网卡的所有流量，包括 API 调用、SSH、系统更新和文件传输，因此可能和云服务商账单不完全相同。流量包最终用量请以云服务商后台为准。',
 +        overview_realtime_section_title: '最近使用情况',
 +        overview_realtime_window: '选择最近时段',
 +        overview_realtime_token_velocity: '每分钟总用量',
@@ -1424,7 +2494,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          duration_unit_ms: '毫秒',
          duration_unit_s: '秒',
          duration_unit_m: '分钟',
-@@ -734,52 +787,52 @@ const resources = {
+@@ -734,52 +855,52 @@ const resources = {
          clear_filters: '清除筛选',
          export_csv: '导出 CSV',
          export_json: '导出 JSON',
@@ -1508,7 +2578,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          request_events_log_empty: '暂无日志内容。',
          request_events_log_missing_event: '该事件无法打开。',
          request_events_log_unavailable: 'CPA 尚未生成该日志，或日志已经被清理。',
-@@ -788,20 +841,20 @@ const resources = {
+@@ -788,20 +909,20 @@ const resources = {
          model_name: '模型',
          model_alias: '模型别名',
          source_name: '来源',
@@ -1539,7 +2609,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          credentials_filter_all: '全部',
          credentials_filter_antigravity: 'Antigravity',
          credentials_filter_claude: 'Claude',
-@@ -811,66 +864,66 @@ const resources = {
+@@ -811,66 +932,66 @@ const resources = {
          credentials_filter_iflow: 'iFlow',
          credentials_filter_openai: 'OpenAI',
          credentials_filter_xai: 'xAI',
@@ -1651,7 +2721,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          credentials_auto_refresh_settings: '定时刷新设置',
          credentials_auto_refresh_enabled: '定时刷新',
          credentials_auto_refresh_save: '保存',
-@@ -899,14 +952,14 @@ const resources = {
+@@ -899,14 +1020,14 @@ const resources = {
          credentials_auto_refresh_load_failed: '加载定时刷新设置失败。',
          credentials_auto_refresh_save_failed: '保存定时刷新设置失败。',
          credentials_inspection_normal: '正常',
@@ -1670,7 +2740,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          credentials_inspection_disable_invalid: '禁用无效账号',
          credentials_inspection_delete_invalid: '删除无效账号',
          credentials_inspection_disable_action: '禁用',
-@@ -921,29 +974,42 @@ const resources = {
+@@ -921,29 +1042,42 @@ const resources = {
          credentials_inspection_invalid_accounts_sync_tip: '账号状态从 CPA 同步到 Keeper 可能存在短暂延迟。操作后如果列表暂未更新，请稍候再手动刷新。',
          credentials_quota_window_usage_aria: 'Token：{{tokens}}，成本：{{cost}}',
          credentials_quota_billing_usage_aria: '花费：{{used}} / {{limit}}，剩余：{{remaining}}',
@@ -1726,7 +2796,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          credentials_health_bucket_aria: '{{timeRange}}：{{status}}，成功 {{successCount}}，失败 {{failureCount}}，{{rate}}',
          credentials_alias_edit: '编辑别名',
          credentials_alias_save: '保存别名',
-@@ -958,11 +1024,11 @@ const resources = {
+@@ -958,11 +1092,11 @@ const resources = {
          success_count: '成功',
          failure_count: '失败',
          success_rate: '成功率',
@@ -1742,7 +2812,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          api_key_settings_display_key: 'API Key',
          api_key_settings_alias: '别名',
          api_key_settings_saving: '保存中',
-@@ -974,43 +1040,46 @@ const resources = {
+@@ -974,43 +1108,46 @@ const resources = {
          api_key_settings_copy_failed: '无法复制 API Key，需要时可手动选择复制。',
          api_key_settings_alias_save_success: 'API Key 别名已保存。',
          api_key_settings_alias_save_failed: '无法保存 API Key 别名。',
@@ -1815,7 +2885,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          saved_prices: '已保存价格',
          model_price_empty: '暂无已保存价格',
          model_price_save_success: '模型价格已保存。',
-@@ -1029,6 +1098,11 @@ const resources = {
+@@ -1029,6 +1166,11 @@ const resources = {
          model_price_sync_unmatched: '未匹配',
          model_price_sync_matched_model: '匹配到：{{model}}',
          model_price_sync_provider: '提供商：{{provider}}（{{id}}）',
@@ -1827,7 +2897,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          model_price_sync_existing: '当前已有',
          model_price_sync_toggle: '选择 {{model}}',
          model_price_sync_select_all: '全选',
-@@ -1041,51 +1115,51 @@ const resources = {
+@@ -1041,51 +1183,51 @@ const resources = {
          model_price_sync_apply_success: '已更新 {{count}} 个模型价格。',
          model_price_sync_apply_partial: '已更新 {{success}} 个模型价格，{{failed}} 个失败。',
          model_price_sync_failed_label: '{{model}} 价格同步失败。',
@@ -1908,7 +2978,55 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          analysis_others: '其他'
        }
      }
-@@ -1217,6 +1291,10 @@ const resources = {
+@@ -1176,6 +1318,7 @@ const resources = {
+         tab_ai_provider: 'AI 供應商',
+         tab_settings: '設定',
+         tab_pricing: '定價',
++        tab_network: '伺服器流量',
+         range_filter: '範圍',
+         api_key_filter: 'API Key',
+         api_key_filter_all: '全部',
+@@ -1194,6 +1337,39 @@ const resources = {
+         custom_invalid: '開始日期不能晚於結束日期',
+         custom_incomplete: '請選擇完整的開始與結束日期',
+         no_data: '尚無資料',
++        network_title: '伺服器流量',
++        network_subtitle: '查看這台伺服器目前網速，以及開始監控後累計使用的流量。',
++        network_status_live: '正在即時統計',
++        network_status_stale: '資料有延遲',
++        network_status_unavailable: '暫無即時資料',
++        network_interface: '網路介面',
++        network_load_failed: '伺服器流量載入失敗，頁面上的舊資料可能已過時。',
++        network_realtime_title: '目前網速',
++        network_refresh_hint: '約每 2 秒更新一次',
++        network_receive: '接收',
++        network_send: '傳送',
++        network_receive_speed: '目前接收速度',
++        network_send_speed: '目前傳送速度',
++        network_total_speed: '目前總速度',
++        network_peak: '最高速度',
++        network_accumulated_title: '開始監控後的累計流量',
++        network_started_at: '開始統計時間',
++        network_received: '累計接收',
++        network_sent: '累計傳送',
++        network_total: '收發合計',
++        network_since_boot_title: '本次系統啟動後的網路介面總流量',
++        network_since_boot_hint: '這是網路介面原始計數，僅供參考，不代表流量包計費用量。',
++        network_counter_reset: '計數已重新開始 {{count}} 次',
++        network_package_title: '已購流量包',
++        network_package_outbound_hint: '流量包進度按伺服器向外傳送的流量計算。',
++        network_package_unconfigured: '尚未設定流量包額度',
++        network_package_used: '已使用',
++        network_package_remaining: '剩餘',
++        network_chart_title: '最近 24 小時網速',
++        network_chart_subtitle: '接收和傳送速度，單位 Mbps',
++        network_chart_empty: '正在等待網速記錄',
++        network_estimate_title: '這是本機網路介面流量估算',
++        network_estimate_notice: '這裡會統計經過此網路介面的所有流量，包括 API 呼叫、SSH、系統更新和檔案傳輸，因此可能和雲端服務商帳單不完全相同。流量包最終用量請以雲端服務商後台為準。',
+         overview_realtime_section_title: '即時指標',
+         overview_realtime_window: '即時視窗',
+         overview_realtime_token_velocity: 'Token 速度',
+@@ -1217,6 +1393,10 @@ const resources = {
          overview_realtime_cache_empty: '暫無可計算的快取率',
          overview_realtime_usage_empty: '暫無使用占比資料',
          overview_realtime_rolling_metric_hint: '目前值、均值和趨勢均基於所選視窗的滑動聚合。',
@@ -1919,7 +3037,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          overview_realtime_tokens_label: 'Tokens',
          overview_realtime_requests_label: '請求',
          overview_realtime_cost_label: '成本',
-@@ -1241,11 +1319,16 @@ const resources = {
+@@ -1241,11 +1421,16 @@ const resources = {
          ttft_hint: '首字延遲',
          speed: '生成速度',
          speed_hint: '首字後可見輸出 token 的平均速度',
@@ -1936,7 +3054,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          request_endpoint: '端點',
          cache_rate: '快取率',
          cache_read_tokens: '快取讀取',
-@@ -1253,6 +1336,13 @@ const resources = {
+@@ -1253,6 +1438,13 @@ const resources = {
          reasoning_tokens: '推理',
          reasoning_effort: '推理強度',
          reasoning_effort_hint: '推理強度',
@@ -1950,7 +3068,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          rpm: 'RPM',
          tpm: 'TPM',
          rpm_30m: 'RPM（30 分鐘）',
-@@ -1461,6 +1551,19 @@ const resources = {
+@@ -1461,6 +1653,19 @@ const resources = {
          credentials_quota_usage_mode_aria: '限額用量顯示模式',
          credentials_quota_usage_mode_current: '目前',
          credentials_quota_usage_mode_estimated: '預估',
@@ -1970,7 +3088,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          credentials_last_used: '最後使用',
          credentials_stats_updated: '統計更新',
          credentials_health_last_5h: '最近 5 小時',
-@@ -1547,6 +1650,9 @@ const resources = {
+@@ -1547,6 +1752,9 @@ const resources = {
          model_price_cache_read: '快取讀取',
          model_price_cache_write: '快取寫入',
          model_price_multiplier: '倍率',
@@ -1980,7 +3098,7 @@ index f11b9c076daea620abf7d58b02dd5d8d5de3b95f..4086744d35426f49a7a6aefe20d8c9ac
          saved_prices: '已儲存價格',
          model_price_empty: '尚無已儲存價格',
          model_price_save_success: '模型價格已儲存。',
-@@ -1565,6 +1671,11 @@ const resources = {
+@@ -1565,6 +1773,11 @@ const resources = {
          model_price_sync_unmatched: '未匹配',
          model_price_sync_matched_model: '匹配到：{{model}}',
          model_price_sync_provider: '提供商：{{provider}}（{{id}}）',
@@ -2089,6 +3207,283 @@ index 0439a3cbd88cb86027077bb8b78438a6c645a44a..31f14c33b1f1f3b6050e1cc1b8598ca0
      expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_quota_reset_expiry_failed')).toBe('过期时间获取失败，仍可按缓存次数继续重置。')
      expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_expiry_title')).toBe('主動重置過期時間（GMT+8）')
      expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_quota_reset_expiry_failed')).toBe('到期時間取得失敗，仍可依快取次數繼續重置。')
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index d2c03a43d217a955b14841d1426f006401523d0c..5ca663057d63a15e0eb06767b200a992b745c954 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -1,5 +1,6 @@
+ import { type AnalysisResponse, type AuthFilesManagementResponse, type AuthManagedSessionsResponse, type AuthSessionResponse, type CpaApiKeyDisplayItem, type CpaApiKeyOptionsResponse, type CpaApiKeySettingsResponse, type CpaApiKeysResponse, type KeyOverviewTimeRange, type OverviewRealtimeBlock, type OverviewRealtimeWindow, type PricingEntry, type PricingResponse, type PricingSyncPreviewResponse, type QuotaAutoRefreshSettings, type StatusResponse, type UpdateCheckResponse, type UsageEventModelFilterOptionsResponse, type UsageEventRequestLogResponse, type UsageEventSourceFilterOptionsResponse, type UsedModelsResponse, type UsageIdentitiesPageResponse, type UsageIdentitiesResponse, type UsageEventsResponse, type UsageIdentity, type UsageIdentityAuthType, type UsageOverviewResponse, type UsageQuotaCacheResponse, type UsageQuotaInspectionStatusResponse, type UsageQuotaRefreshResponse, type UsageQuotaRefreshTaskResponse, type UsageQuotaResetCreditsResponse, type UsageQuotaResetResponse, type VersionResponse } from './types'
+ import { isCPAMCEmbed } from '@/embed/cpamcEmbed'
++import type { ServerNetworkHistoryRange, ServerNetworkHistoryResponse, ServerNetworkSummaryResponse } from './types'
+
+ export class ApiError extends Error {
+   status: number
+@@ -727,6 +728,26 @@ export async function fetchStatus(signal?: AbortSignal): Promise<StatusResponse>
+   return response.json()
+ }
+
++export async function fetchServerNetwork(signal?: AbortSignal): Promise<ServerNetworkSummaryResponse> {
++  const response = await apiFetch(apiPath('/server-network'), { signal, cache: 'no-store' })
++  if (!response.ok) {
++    await parseApiError(response, `Failed to load server network usage: ${response.status}`)
++  }
++  return response.json()
++}
++
++export async function fetchServerNetworkHistory(
++  range: ServerNetworkHistoryRange = '24h',
++  signal?: AbortSignal,
++): Promise<ServerNetworkHistoryResponse> {
++  const params = new URLSearchParams({ range })
++  const response = await apiFetch(`${apiPath('/server-network/history')}?${params.toString()}`, { signal, cache: 'no-store' })
++  if (!response.ok) {
++    await parseApiError(response, `Failed to load server network history: ${response.status}`)
++  }
++  return response.json()
++}
++
+ export async function fetchVersion(signal?: AbortSignal): Promise<VersionResponse> {
+   const response = await apiFetch(apiPath('/version'), { signal, cache: 'no-store' })
+   if (!response.ok) {
+diff --git a/web/src/lib/test/serverNetworkApi.test.ts b/web/src/lib/test/serverNetworkApi.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b72417511e890210347e88a744955a1b1962d800
+--- /dev/null
++++ b/web/src/lib/test/serverNetworkApi.test.ts
+@@ -0,0 +1,29 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { fetchServerNetwork, fetchServerNetworkHistory } from '../api';
++
++describe('server network API', () => {
++  afterEach(() => {
++    vi.restoreAllMocks();
++    vi.unstubAllGlobals();
++  });
++
++  it('loads the live summary and 24-hour history through protected usage API paths', async () => {
++    vi.stubGlobal('window', { __APP_BASE_PATH__: '/usage' });
++    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
++      ok: true,
++      json: async () => ({ points: [] }),
++    } as Response);
++    const signal = new AbortController().signal;
++
++    await fetchServerNetwork(signal);
++    await fetchServerNetworkHistory('24h', signal);
++
++    const summaryURL = new URL(String(fetchMock.mock.calls[0][0]), 'http://localhost');
++    const historyURL = new URL(String(fetchMock.mock.calls[1][0]), 'http://localhost');
++    expect(summaryURL.pathname).toBe('/usage/api/v1/server-network');
++    expect(historyURL.pathname).toBe('/usage/api/v1/server-network/history');
++    expect(historyURL.searchParams.get('range')).toBe('24h');
++    expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: 'include', cache: 'no-store', signal });
++    expect(fetchMock.mock.calls[1][1]).toMatchObject({ credentials: 'include', cache: 'no-store', signal });
++  });
++});
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index f3d28305ff3c2a5df1b4cb6aff472c6d4a1bd8ba..537b2b6e71bc85840bfb0f417b412137fd77cdf3 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -43,6 +43,53 @@ export interface StatusResponse {
+   last_status?: string
+ }
+
++export interface ServerNetworkByteCounters {
++  rx_bytes: number
++  tx_bytes: number
++  total_bytes: number
++}
++
++export interface ServerNetworkRateCounters {
++  rx_bytes_per_sec: number
++  tx_bytes_per_sec: number
++  total_bytes_per_sec: number
++}
++
++export interface ServerNetworkPackageUsage {
++  configured: boolean
++  total_bytes: number
++  used_bytes: number
++  remaining_bytes: number
++  percent: number
++  start_at?: string | null
++  end_at?: string | null
++}
++
++export interface ServerNetworkSummaryResponse {
++  generated_at: string
++  stale: boolean
++  interface: string
++  monitor_started_at: string
++  current: ServerNetworkRateCounters
++  peak: ServerNetworkRateCounters
++  monitored: ServerNetworkByteCounters
++  since_boot: ServerNetworkByteCounters
++  package: ServerNetworkPackageUsage
++  reset_count: number
++}
++
++export type ServerNetworkHistoryRange = '15m' | '1h' | '6h' | '24h' | '7d' | '30d'
++
++export interface ServerNetworkHistoryPoint extends ServerNetworkRateCounters {
++  timestamp: string
++}
++
++export interface ServerNetworkHistoryResponse {
++  generated_at: string
++  range: ServerNetworkHistoryRange
++  points: ServerNetworkHistoryPoint[]
++}
++
+ export type QuotaAutoRefreshScheduleUnit = 'minute' | 'hour' | 'day' | 'week'
+
+ export interface QuotaAutoRefreshSchedule {
+diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
+index 1e811195e7b2a0dbb48dba4269048b8f4f02a9e8..73d3e0ff42e8b44b57391c3819448ffb97ecf4b3 100644
+--- a/web/src/pages/UsagePage.tsx
++++ b/web/src/pages/UsagePage.tsx
+@@ -23,8 +23,10 @@ import {
+   AiProviderCredentialsSection,
+   CredentialProviderFilterBar,
+   ServiceHealthCard,
++  ServerNetworkPanel,
+   useUsageData,
+   useOverviewRealtimeData,
++  useServerNetworkData,
+   usePricingData,
+   useSparklines,
+   useCredentialsTabData
+@@ -67,11 +69,12 @@ const THEME_OPTIONS: ReadonlyArray<{ value: Theme; labelKey: string }> = [
+   { value: 'dark', labelKey: 'usage_stats.theme_dark' },
+   { value: 'auto', labelKey: 'usage_stats.theme_auto' }
+ ];
+-const USAGE_TAB_OPTIONS = ['overview', 'analysis', 'events', 'auth-files', 'ai-provider', 'settings'] as const;
++const USAGE_TAB_OPTIONS = ['overview', 'network', 'analysis', 'events', 'auth-files', 'ai-provider', 'settings'] as const;
+ type UsageTab = (typeof USAGE_TAB_OPTIONS)[number];
+ type Translate = (key: string) => string;
+ const USAGE_TAB_LABEL_KEYS: Record<UsageTab, string> = {
+   overview: 'usage_stats.tab_overview',
++  network: 'usage_stats.tab_network',
+   analysis: 'usage_stats.tab_analysis',
+   events: 'usage_stats.tab_events',
+   'auth-files': 'usage_stats.tab_auth_files',
+@@ -97,7 +100,7 @@ export const getCredentialSectionVisibility = (tab: UsageTab) => ({
+   showAiProvider: tab === 'ai-provider',
+ });
+
+-export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'settings' && !getCredentialSectionVisibility(tab).enabled;
++export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'settings' && tab !== 'network' && !getCredentialSectionVisibility(tab).enabled;
+
+ export const shouldShowApiKeyFilter = (tab: UsageTab) => shouldShowRangeControls(tab);
+
+@@ -922,6 +925,16 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+     apiKeyId: selectedApiKeyId,
+     realtimeWindow,
+   });
++  const {
++    summary: networkSummary,
++    history: networkHistory,
++    loading: networkLoading,
++    error: networkError,
++    loadNetwork,
++  } = useServerNetworkData({
++    onAuthRequired,
++    enabled: activeTab === 'network',
++  });
+   const {
+     modelNames,
+     modelPrices,
+@@ -1627,6 +1640,10 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+   }, [onAuthRequired, requestLogAccessEnabled, showTopNotice, t]);
+
+   const refreshActiveTab = useCallback(async () => {
++    if (activeTab === 'network') {
++      await loadNetwork();
++      return;
++    }
+     if (activeTab === 'events') {
+       await Promise.all([loadEventFilterOptions(), loadEvents()]);
+       return;
+@@ -1644,7 +1661,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+       return;
+     }
+     await Promise.all([loadUsage(), loadRealtime()]);
+-  }, [activeTab, credentialSectionVisibility.enabled, loadAnalysis, loadApiKeySettings, loadAuthSessions, loadEventFilterOptions, loadEvents, loadPricing, loadRealtime, loadUsage, refreshCredentials]);
++  }, [activeTab, credentialSectionVisibility.enabled, loadAnalysis, loadApiKeySettings, loadAuthSessions, loadEventFilterOptions, loadEvents, loadNetwork, loadPricing, loadRealtime, loadUsage, refreshCredentials]);
+
+   const refreshAutoRefreshTab = useCallback(async () => {
+     if (activeTab === 'events') {
+@@ -1941,9 +1958,9 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+               </div>
+             )}
+
+-            {((!isEmbeddedInCPAMC && cpaManagementURL) || lastSyncAt) && (
++            {((!isEmbeddedInCPAMC && cpaManagementURL) || (activeTab !== 'network' && lastSyncAt)) && (
+               <div className={styles.toolbarMetaRow}>
+-                {lastSyncAt && (
++                {activeTab !== 'network' && lastSyncAt && (
+                   <span className={styles.lastRefreshed}>
+                     {t('usage_stats.last_updated')}: {lastSyncAt.toLocaleTimeString()}
+                   </span>
+@@ -2186,6 +2203,17 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+               </>
+             )}
+
++            {activeTab === 'network' && (
++              <ServerNetworkPanel
++                summary={networkSummary}
++                history={networkHistory}
++                loading={networkLoading}
++                error={networkError}
++                isDark={isDark}
++                isMobile={isMobile}
++              />
++            )}
++
+             {activeTab === 'analysis' && (
+               <>
+                 {analysisError && <div className={styles.errorBox}>{analysisError}</div>}
+diff --git a/web/src/pages/test/UsagePage.logic.test.ts b/web/src/pages/test/UsagePage.logic.test.ts
+index 9e2821686afb959d891412aaed3279cd36409018..1ec1f834950c53a4fa06e75bf6e89a5fc5c43e69 100644
+--- a/web/src/pages/test/UsagePage.logic.test.ts
++++ b/web/src/pages/test/UsagePage.logic.test.ts
+@@ -597,6 +597,7 @@ describe('UsagePage request event preferences', () => {
+
+ for (const [tab, expected] of [
+   ['overview', true],
++  ['network', false],
+   ['analysis', true],
+   ['events', true],
+   ['auth-files', false],
+@@ -610,6 +611,7 @@ for (const [tab, expected] of [
+
+ for (const [tab, expected] of [
+   ['overview', true],
++  ['network', false],
+   ['analysis', true],
+   ['events', true],
+   ['auth-files', false],
+@@ -705,6 +707,7 @@ describe('UsagePage tab labels', () => {
+
+     expect(labels).toEqual([
+       'translated:usage_stats.tab_overview',
++      'translated:usage_stats.tab_network',
+       'translated:usage_stats.tab_analysis',
+       'translated:usage_stats.tab_events',
+       'translated:usage_stats.tab_auth_files',
+diff --git a/web/src/pages/test/UsagePage.styles.test.ts b/web/src/pages/test/UsagePage.styles.test.ts
+index 640b3d799fc0f950ddb83d88dc70d0ba2c7aaf78..d6cf6822f00b3c0968da39559a6771e02bff434e 100644
+--- a/web/src/pages/test/UsagePage.styles.test.ts
++++ b/web/src/pages/test/UsagePage.styles.test.ts
+@@ -261,7 +261,7 @@ describe('UsagePage toolbar styles', () => {
+     expect(i18nSource).not.toContain("tab_analysis: 'API & Models'")
+     expect(i18nSource).not.toContain("tab_analysis: 'API 与模型'")
+     expect(i18nSource).not.toContain("tab_analysis: 'API 與模型'")
+-    expect(usagePageSource).toContain("const USAGE_TAB_OPTIONS = ['overview', 'analysis', 'events', 'auth-files', 'ai-provider', 'settings'] as const")
++    expect(usagePageSource).toContain("const USAGE_TAB_OPTIONS = ['overview', 'network', 'analysis', 'events', 'auth-files', 'ai-provider', 'settings'] as const")
+   })
+
+   it('keeps Sign out as the rightmost header action after Check Updates', () => {
 diff --git a/web/src/test/indexHtml.test.ts b/web/src/test/indexHtml.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..a491f868c34ae3223622c417220e9a34f814839a
