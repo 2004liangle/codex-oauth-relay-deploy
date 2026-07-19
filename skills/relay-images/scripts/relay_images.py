@@ -430,21 +430,25 @@ def require_transparent_artifact_output(
             "relay does not advertise validated transparent PNG output; job was not submitted",
             EXIT_ROUTE,
         )
-    models = feature.get("models")
-    if not isinstance(models, list) or not models or not all(
-        isinstance(item, str) for item in models
-    ):
+
+
+def require_cutout_artifact_output(capabilities: Mapping[str, object]) -> None:
+    operations = capabilities.get("operations")
+    if not isinstance(operations, list) or "image.cutout" not in operations:
         raise RelayError(
-            "relay returned an invalid transparent cutout model list; job was not submitted",
+            "relay does not advertise image.cutout; job was not submitted",
             EXIT_ROUTE,
         )
-    requested_model = parameters.get("background_removal_model")
-    selected_model = (
-        requested_model if requested_model is not None else feature.get("default_model")
-    )
-    if not isinstance(selected_model, str) or selected_model not in models:
+    feature = capabilities.get("cutout")
+    if (
+        not isinstance(feature, dict)
+        or feature.get("provider") != "dreamina_agent"
+        or feature.get("format") != "png"
+        or feature.get("max_inputs") != 1
+        or feature.get("alpha_validation") is not True
+    ):
         raise RelayError(
-            "relay does not support the selected transparent cutout model; job was not submitted",
+            "relay does not advertise validated Dreamina Agent cutout; job was not submitted",
             EXIT_ROUTE,
         )
 
@@ -1200,8 +1204,6 @@ def image_options(args: argparse.Namespace) -> dict[str, object]:
         )
     if args.background == "transparent" and args.output_format != "png":
         raise RelayError("transparent backgrounds require PNG output")
-    if args.cutout_model is not None and args.background != "transparent":
-        raise RelayError("--cutout-model requires --background transparent")
     stream = bool(args.stream or args.partial_images)
     if stream and args.n != 1:
         raise RelayError("streaming currently requires --n 1")
@@ -1216,8 +1218,6 @@ def image_options(args: argparse.Namespace) -> dict[str, object]:
     }
     if args.compression is not None:
         options["output_compression"] = args.compression
-    if artifact_delivery and args.cutout_model is not None:
-        options["background_removal_model"] = args.cutout_model
     if stream:
         options["stream"] = True
         options["partial_images"] = args.partial_images
@@ -2211,6 +2211,91 @@ def run_artifact_edit(args: argparse.Namespace) -> None:
     artifact_image_summary(args, job, images)
 
 
+def run_artifact_cutout(args: argparse.Namespace) -> None:
+    image = validate_edit_files([args.image], None)[0]
+    request_id = validate_request_id(args.request_id)
+    output_plan = dry_run_output_plan(args, "cutout")
+    parameters: dict[str, object] = {}
+    local_input = {
+        "role": "image",
+        "path": str(image.path),
+        "name": safe_artifact_name(image.path.name),
+        "mime_type": image.mime,
+        "size_bytes": image.size,
+        "sha256": hashlib.sha256(image.data).hexdigest(),
+    }
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "operation": "artifact-cutout",
+                    "endpoint": "/v1/artifact-jobs",
+                    "request_id": request_id,
+                    "job_operation": "image.cutout",
+                    "parameters": parameters,
+                    "local_input": local_input,
+                    "output": output_plan,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+
+    eprint(f"artifact request_id: {request_id}")
+    relay = resolve_config(args)
+    capabilities = artifact_capabilities(relay, args.timeout, args.request_retries)
+    require_cutout_artifact_output(capabilities)
+    lark = resolve_lark_config(args, capabilities, require_target=True)
+    uploaded = upload_validated_image(lark, image, args.timeout, args.upload_retries)
+    job = submit_artifact_job(
+        relay,
+        request_id,
+        "image.cutout",
+        parameters,
+        [uploaded],
+        args.timeout,
+        args.request_retries,
+    )
+    job = wait_for_artifact_job(
+        relay,
+        job,
+        args.timeout,
+        args.request_retries,
+        args.poll_interval,
+        args.wait_timeout,
+    )
+    if job["status"] == "failed":
+        raise artifact_failure(job)
+    images = download_artifact_outputs(
+        lark,
+        job,
+        args.output,
+        args.overwrite,
+        args.timeout,
+        args.download_retries,
+        image=True,
+    )
+    if len(images) != 1 or images[0].get("format") != "png":
+        raise RelayError("image.cutout did not return exactly one PNG", EXIT_RESPONSE)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "delivery": "lark_drive",
+                "operation": "image.cutout",
+                "endpoint": "/v1/artifact-jobs",
+                "request_id": request_id,
+                "status": job["status"],
+                "requested_format": "png",
+                "images": images,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def run_artifact_upload(args: argparse.Namespace) -> None:
     plans: list[dict[str, object]] = []
     for value in args.file:
@@ -2515,11 +2600,6 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--format", dest="output_format", choices=("png", "jpeg", "webp"), default="png")
     parser.add_argument("--compression", type=int)
     parser.add_argument("--background", choices=("auto", "opaque", "transparent"), default="auto")
-    parser.add_argument(
-        "--cutout-model",
-        choices=("isnet-general-use", "isnet-anime"),
-        help="server-side model used for transparent artifact output",
-    )
     parser.add_argument("--moderation", choices=("auto", "low"), default="auto")
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--stream", action="store_true")
@@ -2637,6 +2717,31 @@ def build_parser() -> argparse.ArgumentParser:
         target=True,
     )
     artifact_edit.set_defaults(handler=run_artifact_edit)
+
+    artifact_cutout = subparsers.add_parser(
+        "artifact-cutout",
+        help="remove the background from one local image with the server's Dreamina Agent",
+    )
+    artifact_cutout.add_argument("--image", required=True, help="single PNG, JPEG, or WebP input")
+    artifact_cutout.add_argument("--request-id")
+    artifact_cutout.add_argument("--output", "--out")
+    artifact_cutout.add_argument("--overwrite", "--force", action="store_true")
+    artifact_cutout.add_argument("--timeout", type=float, default=300.0)
+    artifact_cutout.add_argument("--dry-run", action="store_true")
+    add_artifact_runtime_options(
+        artifact_cutout,
+        upload=True,
+        download=True,
+        wait=True,
+        target=True,
+    )
+    artifact_cutout.set_defaults(
+        handler=run_artifact_cutout,
+        output_format="png",
+        n=1,
+        stream=False,
+        partial_images=0,
+    )
 
     artifact_upload = subparsers.add_parser(
         "artifact-upload",

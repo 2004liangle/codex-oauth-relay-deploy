@@ -6,6 +6,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE="$SCRIPT_DIR/artifact-relay/artifact_relay.py"
+DREAMINA_RUNNER_SOURCE="$SCRIPT_DIR/artifact-relay/dreamina_agent_cutout.mjs"
 BACKGROUND_REMOVER_SOURCE="$SCRIPT_DIR/artifact-relay/remove_background.py"
 REQUIREMENTS_SOURCE="$SCRIPT_DIR/artifact-relay/requirements.txt"
 INSTALL_ROOT="/opt/codex-artifact-relay"
@@ -13,6 +14,8 @@ VENV=""
 VENV_STAGING=""
 STATE_DIR="/var/lib/codex-artifact-relay"
 MODEL_DIR="$STATE_DIR/models"
+DREAMINA_PROFILE_DIR="$STATE_DIR/dreamina-profile"
+DREAMINA_DIAGNOSTICS_DIR="$STATE_DIR/dreamina-diagnostics"
 CONFIG_DIR="/etc/codex-artifact-relay"
 ENV_FILE="$CONFIG_DIR/env"
 UNIT_FILE="/etc/systemd/system/codex-artifact-relay.service"
@@ -23,6 +26,9 @@ INTERNAL_PORT="${ARTIFACT_RELAY_PORT:-18318}"
 WORKER_COUNT="${ARTIFACT_RELAY_WORKERS:-2}"
 REMBG_VERSION="2.0.77"
 PYTHON_BIN="${ARTIFACT_RELAY_PYTHON:-}"
+DREAMINA_NODE="${ARTIFACT_RELAY_DREAMINA_NODE:-/usr/bin/node}"
+DREAMINA_BROWSER="${ARTIFACT_RELAY_DREAMINA_BROWSER:-}"
+DREAMINA_PROFILE_SOURCE="${ARTIFACT_RELAY_DREAMINA_PROFILE_SOURCE:-}"
 GENERAL_MODEL_SHA256="60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a"
 ANIME_MODEL_SHA256="f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99"
 
@@ -55,6 +61,7 @@ wait_for_http() {
 
 [[ ${EUID} -eq 0 ]] || die "Run this installer with sudo or as root."
 [[ -f "$SOURCE" ]] || die "Run this script from the codex-oauth-relay-deploy checkout."
+[[ -f "$DREAMINA_RUNNER_SOURCE" ]] || die "The Dreamina Agent runner is missing."
 [[ -f "$BACKGROUND_REMOVER_SOURCE" ]] || die "The background-removal helper is missing."
 [[ -f "$REQUIREMENTS_SOURCE" ]] || die "The artifact relay requirements file is missing."
 if [[ -n "$PYTHON_BIN" ]]; then
@@ -127,6 +134,25 @@ LARK_IDENTITY="${FEISHU_LARK_IDENTITY:-bot}"
 [[ "$LARK_CLI" =~ ^[A-Za-z0-9_./-]+$ && -x "$LARK_CLI" ]] || \
   die "lark-cli is not executable at $LARK_CLI"
 [[ "$RUN_HOME" =~ ^[A-Za-z0-9_./-]+$ ]] || die "The lark-cli home path contains unsupported characters."
+[[ "$DREAMINA_NODE" == /* && "$DREAMINA_NODE" =~ ^/[A-Za-z0-9_./+-]+$ && -x "$DREAMINA_NODE" ]] || \
+  die "ARTIFACT_RELAY_DREAMINA_NODE must be an executable absolute path."
+"$DREAMINA_NODE" -e 'const major=Number(process.versions.node.split(".")[0]);process.exit(major>=22?0:1)' || \
+  die "Dreamina Agent automation requires Node.js 22 or newer."
+if [[ -z "$DREAMINA_BROWSER" ]]; then
+  for CANDIDATE in \
+    /usr/bin/google-chrome /usr/bin/chromium /usr/bin/chromium-browser \
+    "$RUN_HOME"/.cache/ms-playwright/chromium-*/chrome-linux64/chrome; do
+    if [[ -x "$CANDIDATE" ]]; then
+      DREAMINA_BROWSER="$CANDIDATE"
+    fi
+  done
+fi
+[[ "$DREAMINA_BROWSER" == /* && "$DREAMINA_BROWSER" =~ ^/[A-Za-z0-9_./+-]+$ && -x "$DREAMINA_BROWSER" ]] || \
+  die "Set ARTIFACT_RELAY_DREAMINA_BROWSER to an executable Chromium path."
+if [[ -n "$DREAMINA_PROFILE_SOURCE" ]]; then
+  [[ "$DREAMINA_PROFILE_SOURCE" == /* && "$DREAMINA_PROFILE_SOURCE" =~ ^/[A-Za-z0-9_./+-]+$ && -d "$DREAMINA_PROFILE_SOURCE" ]] || \
+    die "ARTIFACT_RELAY_DREAMINA_PROFILE_SOURCE must be a readable absolute directory."
+fi
 [[ "$INTERNAL_PORT" =~ ^[0-9]+$ ]] || die "ARTIFACT_RELAY_PORT must be numeric."
 (( INTERNAL_PORT >= 1 && INTERNAL_PORT <= 65535 )) || die "ARTIFACT_RELAY_PORT is out of range."
 [[ "$WORKER_COUNT" =~ ^[0-9]+$ ]] || die "ARTIFACT_RELAY_WORKERS must be numeric."
@@ -179,6 +205,15 @@ install -d -o root -g root -m 0755 "$INSTALL_ROOT"
 install -d -o root -g "$RUN_GROUP" -m 0750 "$CONFIG_DIR"
 install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0700 "$STATE_DIR"
 install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0700 "$MODEL_DIR"
+install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0700 "$DREAMINA_PROFILE_DIR"
+install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0700 "$DREAMINA_DIAGNOSTICS_DIR"
+if [[ -n "$DREAMINA_PROFILE_SOURCE" && ! -f "$DREAMINA_PROFILE_DIR/Local State" ]]; then
+  cp -a "$DREAMINA_PROFILE_SOURCE"/. "$DREAMINA_PROFILE_DIR"/
+  rm -f -- "$DREAMINA_PROFILE_DIR/SingletonCookie" \
+    "$DREAMINA_PROFILE_DIR/SingletonLock" "$DREAMINA_PROFILE_DIR/SingletonSocket"
+  chown -R "$RUN_USER":"$RUN_GROUP" "$DREAMINA_PROFILE_DIR"
+  chmod 0700 "$DREAMINA_PROFILE_DIR"
+fi
 
 INSTALLED_REQUIREMENTS_SHA=""
 if [[ -r "$VENV/.artifact-relay-requirements.sha256" ]]; then
@@ -222,6 +257,7 @@ printf '%s  %s\n' "$ANIME_MODEL_SHA256" "$MODEL_DIR/isnet-anime.onnx" | \
   sha256sum -c - >/dev/null || die "The anime background-removal model checksum is invalid."
 
 install -o root -g root -m 0755 "$SOURCE" "$INSTALL_ROOT/artifact_relay.py"
+install -o root -g root -m 0755 "$DREAMINA_RUNNER_SOURCE" "$INSTALL_ROOT/dreamina_agent_cutout.mjs"
 install -o root -g root -m 0755 "$BACKGROUND_REMOVER_SOURCE" "$INSTALL_ROOT/remove_background.py"
 install -o root -g root -m 0644 "$REQUIREMENTS_SOURCE" "$INSTALL_ROOT/requirements.txt"
 
@@ -243,6 +279,12 @@ ARTIFACT_RELAY_BACKGROUND_REMOVAL_SCRIPT=$INSTALL_ROOT/remove_background.py
 ARTIFACT_RELAY_BACKGROUND_REMOVAL_MODEL_DIR=$MODEL_DIR
 ARTIFACT_RELAY_BACKGROUND_REMOVAL_MODEL=isnet-general-use
 ARTIFACT_RELAY_BACKGROUND_REMOVAL_TIMEOUT=600
+ARTIFACT_RELAY_DREAMINA_NODE=$DREAMINA_NODE
+ARTIFACT_RELAY_DREAMINA_RUNNER=$INSTALL_ROOT/dreamina_agent_cutout.mjs
+ARTIFACT_RELAY_DREAMINA_BROWSER=$DREAMINA_BROWSER
+ARTIFACT_RELAY_DREAMINA_PROFILE_DIR=$DREAMINA_PROFILE_DIR
+ARTIFACT_RELAY_DREAMINA_DIAGNOSTICS_DIR=$DREAMINA_DIAGNOSTICS_DIR
+ARTIFACT_RELAY_DREAMINA_TIMEOUT=900
 EOF
 chown root:"$RUN_GROUP" "$ENV_FILE"
 chmod 0640 "$ENV_FILE"
@@ -270,7 +312,7 @@ MemoryAccounting=true
 MemoryHigh=50%
 MemoryMax=70%
 MemorySwapMax=1G
-TasksMax=128
+TasksMax=384
 
 NoNewPrivileges=true
 PrivateTmp=true
@@ -396,7 +438,7 @@ curl --noproxy '*' -fsS \
   -H "Authorization: Bearer $API_KEY" \
   "$LOCAL_URL/v1/artifact-capabilities" | \
   jq -e --arg token "$FEISHU_INPUT_FOLDER_TOKEN" \
-  '.delivery == "lark_drive" and .retention == "manual" and .input_target.token == $token' \
+  '.delivery == "lark_drive" and .retention == "manual" and .input_target.token == $token and (.operations | index("image.cutout")) != null and .cutout.provider == "dreamina_agent"' \
   >/dev/null || die "Artifact capabilities are not available through Nginx."
 
 mapfile -t INSTALLED_VENVS < <(

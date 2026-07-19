@@ -955,22 +955,21 @@ def check_transparent_output(
             "transparent_output_unsupported",
             "中转服务未启用真实透明 PNG 校验，任务尚未提交",
         )
-    models = feature.get("models")
-    if not isinstance(models, list) or not models or not all(
-        isinstance(item, str) for item in models
+
+
+def check_cutout_output(capabilities: Mapping[str, Any]) -> None:
+    check_capability(capabilities, "image.cutout")
+    feature = capabilities.get("cutout")
+    if (
+        not isinstance(feature, dict)
+        or feature.get("provider") != "dreamina_agent"
+        or feature.get("format") != "png"
+        or feature.get("max_inputs") != 1
+        or feature.get("alpha_validation") is not True
     ):
         raise ToolError(
-            "invalid_capabilities",
-            "中转服务返回的透明抠图模型清单无效，任务尚未提交",
-        )
-    requested_model = parameters.get("background_removal_model")
-    selected_model = (
-        requested_model if requested_model is not None else feature.get("default_model")
-    )
-    if not isinstance(selected_model, str) or selected_model not in models:
-        raise ToolError(
-            "unsupported_cutout_model",
-            "中转服务不支持所选透明抠图模型，任务尚未提交",
+            "cutout_unsupported",
+            "中转服务未启用经过真实 Alpha 校验的即梦 Agent 抠图，任务尚未提交",
         )
 
 
@@ -1061,8 +1060,6 @@ def verify_manifest_total(manifests: Sequence[Mapping[str, Any]], capabilities: 
 def image_parameters(args: argparse.Namespace, prompt: str) -> Dict[str, Any]:
     if args.background == "transparent" and args.output_format != "png":
         raise ToolError("invalid_image_options", "透明背景必须使用 PNG 格式")
-    if args.cutout_model is not None and args.background != "transparent":
-        raise ToolError("invalid_image_options", "--cutout-model 只能与 --background transparent 一起使用")
     result: Dict[str, Any] = {
         "model": args.model,
         "prompt": prompt,
@@ -1074,7 +1071,6 @@ def image_parameters(args: argparse.Namespace, prompt: str) -> Dict[str, Any]:
     optional = {
         "output_compression": args.compression,
         "background": args.background,
-        "background_removal_model": args.cutout_model,
         "moderation": args.moderation,
         "output_name": args.output_name,
     }
@@ -1326,6 +1322,62 @@ def command_edit(args: argparse.Namespace) -> Dict[str, Any]:
     return result_with_downloads(config, job, args.download_dir, args.overwrite)
 
 
+def command_cutout(args: argparse.Namespace) -> Dict[str, Any]:
+    config = load_config(args)
+    relay = RelayClient(config)
+    capabilities = relay.capabilities()
+    check_cutout_output(capabilities)
+
+    if args.input_manifest is not None:
+        manifests = input_manifests(
+            args.input_manifest,
+            allowed_roles=("image",),
+            default_role="image",
+        )
+        if len(manifests) != 1:
+            raise ToolError("invalid_input_count", "cutout 需要且只能使用一张图片清单")
+        verify_manifest_total(manifests, capabilities)
+    else:
+        image = preflight_files([args.image], 1, 1)[0]
+        mime_type = sniff_mime(image)
+        if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+            raise ToolError("invalid_image", "cutout 只支持 PNG、JPEG 或 WebP 图片")
+        verify_total_size([image], capabilities)
+        folder = input_folder(config, capabilities)
+        manifest = LarkClient(config).upload(image, folder)
+        manifest["role"] = "image"
+        manifests = [manifest]
+
+    if manifests[0]["mime_type"] not in {"image/png", "image/jpeg", "image/webp"}:
+        raise ToolError("invalid_image", "cutout 只支持 PNG、JPEG 或 WebP 图片")
+    parameters: Dict[str, Any] = {}
+    if args.output_name is not None:
+        if safe_file_name(args.output_name, "") != args.output_name:
+            raise ToolError("invalid_arguments", "--output-name 必须是安全的文件基本名")
+        parameters["output_name"] = args.output_name
+
+    request_id = validate_request_id(args.request_id) if args.request_id else new_request_id()
+    job = relay.submit(
+        {
+            "request_id": request_id,
+            "operation": "image.cutout",
+            "parameters": parameters,
+            "inputs": manifests,
+        }
+    )
+    if args.wait:
+        job = wait_for_job(
+            relay,
+            request_id,
+            timeout=args.wait_timeout,
+            interval=args.poll_interval,
+            require_completed=True,
+        )
+    elif args.download_dir:
+        raise ToolError("invalid_arguments", "使用 --download-dir 时必须同时使用 --wait")
+    return result_with_downloads(config, job, args.download_dir, args.overwrite)
+
+
 def command_handoff(args: argparse.Namespace) -> Dict[str, Any]:
     config = load_config(args)
     relay = RelayClient(config)
@@ -1505,11 +1557,6 @@ def add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--format", dest="output_format", choices=("png", "jpeg", "webp"), default="png")
     parser.add_argument("--compression", type=int)
     parser.add_argument("--background", choices=("auto", "opaque", "transparent"))
-    parser.add_argument(
-        "--cutout-model",
-        choices=("isnet-general-use", "isnet-anime"),
-        help="透明抠图模型：普通图片选 isnet-general-use，动漫人物选 isnet-anime",
-    )
     parser.add_argument("--moderation", choices=("auto", "low"))
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--output-name")
@@ -1530,7 +1577,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="用户明确接受风险后，允许使用未加密的 HTTP 中转地址",
     )
     public_commands = (
-        "{capabilities,manifest,submit-generate,generate,submit-edit,edit,"
+        "{capabilities,manifest,submit-generate,generate,submit-edit,edit,cutout,"
         "submit-handoff,handoff,status,submit-job,download}"
     )
     commands = parser.add_subparsers(
@@ -1577,6 +1624,24 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("--image", action="append", required=True, help="按顺序输入图片，最多可重复 16 次")
     edit.add_argument("--mask", help="可选，作用于第一张图片的蒙版")
     edit.set_defaults(handler=command_edit)
+
+    cutout = commands.add_parser(
+        "cutout",
+        help="用服务端即梦 Agent 抠出单张图片主体并返回真实透明 PNG",
+    )
+    cutout_source = cutout.add_mutually_exclusive_group(required=True)
+    cutout_source.add_argument("--image", help="由脚本上传的一张本地图片")
+    cutout_source.add_argument(
+        "--input-manifest",
+        action="append",
+        help="客户端已上传图片的 JSON 清单或 @文件路径；只能提供一张",
+    )
+    cutout.add_argument("--output-name", help="可选的服务端输出文件名")
+    cutout.add_argument("--request-id")
+    cutout.add_argument("--download-dir")
+    cutout.add_argument("--overwrite", action="store_true")
+    add_wait_options(cutout)
+    cutout.set_defaults(handler=command_cutout)
 
     submit_handoff = commands.add_parser(
         "submit-handoff",

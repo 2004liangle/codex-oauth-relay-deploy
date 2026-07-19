@@ -63,11 +63,16 @@
 
 - `image.generate`：不接收输入文件；必须提供 `parameters.prompt`。
 - `image.edit`：按顺序接收 1-16 个 `role=image` 输入，最多再接收一个 `role=mask` 输入；必须提供 `parameters.prompt`。
+- `image.cutout`：只接收一个 `role=image` 输入；`parameters` 只允许可选的 `output_name`。它不接收提示词、模型、质量、尺寸或背景参数，服务端固定调用即梦 Agent 并返回真实透明 PNG。
 - `artifact.handoff`：接收 1-32 个 `role=attachment` 输入；只接受可选的 `parameters.instruction` 参数。
 
-中转服务支持的图片参数包括 `model`、`prompt`、`quality`、`size`、`n`、`output_format`、`output_compression`、`background`、`moderation`、`user`，以及本地使用的 `output_name` 和 `background_removal_model`。随附客户端开放了其中常用的参数。
+中转服务的生成和编辑参数包括 `model`、`prompt`、`quality`、`size`、`n`、`output_format`、`output_compression`、`background`、`moderation`、`user`，以及本地使用的 `output_name`。随附客户端开放了其中常用的参数。
 
-`background=transparent` 只允许搭配 PNG。客户端会先确认服务端声明了真实 Alpha 校验能力，再提交任务；旧版服务不会消耗本次生成额度。上游没有返回真实 Alpha 时，服务端会调用本地背景分割并再次验证透明像素；验证失败则任务为 `failed`，不会上传不透明结果。`background_removal_model` 可选 `isnet-general-use` 或 `isnet-anime`，客户端参数名为 `--cutout-model`。
+抠图必须使用 `image.cutout`，对应客户端命令为 `cutout`。客户端会先确认 `operations` 包含该操作，并验证 `cutout` 能力中的 `provider=dreamina_agent`、`format=png`、`max_inputs=1` 和 `alpha_validation=true`，再上传或提交任务；旧版或其他抠图后端不会收到任务。服务端使用固定的即梦 Agent 工作流，验证失败时任务为 `failed`，不会上传不透明结果。
+
+同时包含人物生成或内容精修与透明交付的任务必须分两阶段完成：先用 `image.generate`/`image.edit` 得到定稿图，再把定稿图作为唯一输入调用一次 `image.cutout`。即梦阶段只做最终背景移除，不负责生成、改造型或精修人物内容。已有定稿图时直接调用 `image.cutout`。
+
+`image.generate` 和 `image.edit` 仍兼容 `background=transparent`，且只允许搭配 PNG。这是旧版生成/编辑任务的透明输出参数，不是专用抠图接口；用户明确要求抠图、去背景或透明人物素材时不得用它代替 `image.cutout`。
 
 状态值：
 

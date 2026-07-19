@@ -62,6 +62,7 @@ class FakeImageBackend:
     def __init__(self):
         self.generate_calls = []
         self.edit_calls = []
+        self.cutout_calls = []
 
     def generate(self, parameters, output_dir, request_id):
         self.generate_calls.append((dict(parameters), request_id))
@@ -75,6 +76,13 @@ class FakeImageBackend:
         output_dir.mkdir(parents=True, exist_ok=True)
         target = output_dir / "edited.png"
         target.write_bytes(PNG + b"-edited")
+        return [target]
+
+    def cutout(self, parameters, inputs, output_dir, request_id):
+        self.cutout_calls.append((dict(parameters), list(inputs), request_id))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        target = output_dir / "cutout.png"
+        target.write_bytes(PNG + b"-cutout")
         return [target]
 
 
@@ -164,9 +172,51 @@ class ArtifactRelayTests(unittest.TestCase):
         self.assertEqual(value["retention"], "manual")
         self.assertEqual(value["transparent_output"]["format"], "png")
         self.assertTrue(value["transparent_output"]["alpha_validation"])
-        self.assertIn("isnet-anime", value["transparent_output"]["models"])
+        self.assertEqual(value["cutout"]["provider"], "dreamina_agent")
+        self.assertEqual(value["cutout"]["concurrency"], 1)
+        self.assertIn("image.cutout", value["operations"])
         self.assertIn("artifact.handoff", value["operations"])
         self.assertNotIn("secretoutputfoldertoken", json.dumps(value))
+
+    def test_cutout_requires_one_image_and_only_accepts_output_name(self):
+        source = PNG + b"-source"
+        request = {
+            "request_id": "cutout-contract-01",
+            "operation": "image.cutout",
+            "parameters": {"output_name": "person.png"},
+            "inputs": [input_manifest("cutouttoken01", "source.png", source, "image")],
+        }
+        validated = artifact_relay.validate_request(request, self.config.max_input_bytes)
+        self.assertEqual(validated["operation"], "image.cutout")
+        request["parameters"]["prompt"] = "different prompt"
+        with self.assertRaises(artifact_relay.ApiError) as caught:
+            artifact_relay.validate_request(request, self.config.max_input_bytes)
+        self.assertEqual(caught.exception.code, "invalid_parameters")
+
+        request["parameters"] = {}
+        request["inputs"] = []
+        with self.assertRaises(artifact_relay.ApiError) as caught:
+            artifact_relay.validate_request(request, self.config.max_input_bytes)
+        self.assertEqual(caught.exception.code, "invalid_inputs")
+
+    def test_cutout_downloads_source_and_uploads_backend_result(self):
+        source = PNG + b"-source"
+        drive = FakeDrive({"cutouttoken01": source})
+        backend = FakeImageBackend()
+        service = self.service(drive, backend)
+        service.submit(
+            {
+                "request_id": "cutout-service-01",
+                "operation": "image.cutout",
+                "parameters": {"output_name": "person.png"},
+                "inputs": [input_manifest("cutouttoken01", "source.png", source, "image")],
+            }
+        )
+        job = self.wait_for_status(service, "cutout-service-01", {"completed", "failed"})
+        self.assertEqual(job["status"], "completed", job.get("error"))
+        self.assertEqual(len(backend.cutout_calls), 1)
+        self.assertEqual(len(drive.downloads), 1)
+        self.assertEqual(len(drive.uploads), 1)
 
     def test_generate_completes_with_integrity_manifest(self):
         drive = FakeDrive()
@@ -221,7 +271,9 @@ result.save(output, format="PNG")
             background_removal_model_dir=self.root / "models",
         )
         drive = FakeDrive()
-        backend = artifact_relay.ImageBackend(config)
+        backend = artifact_relay.ImageBackend(
+            config, artifact_relay.BackgroundRemover(config)
+        )
         response = {
             "data": [
                 {
@@ -270,7 +322,9 @@ result.save(output, format="PNG")
             background_removal_model_dir=self.root / "models",
         )
         drive = FakeDrive()
-        backend = artifact_relay.ImageBackend(config)
+        backend = artifact_relay.ImageBackend(
+            config, artifact_relay.BackgroundRemover(config)
+        )
         response = {
             "data": [
                 {
@@ -774,6 +828,119 @@ class BackgroundRemovalTests(unittest.TestCase):
         )
         self.assertEqual(paths, [self.root / "outputs" / "transparent01.png"])
         self.assertEqual(remover.calls[0][1], "isnet-anime")
+
+
+class DreaminaAgentCutoutTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "source.png"
+        from PIL import Image
+
+        Image.new("RGB", (100, 100), (220, 220, 220)).save(self.source, format="PNG")
+        self.runner = self.root / "runner.py"
+        self.browser = Path(sys.executable)
+        self.config = artifact_relay.Config(
+            api_key="secret-api-key",
+            state_dir=self.root / "state",
+            upstream_base_url="http://127.0.0.1:9/v1",
+            upstream_api_key="secret-upstream-key",
+            lark_cli="lark-cli",
+            lark_home=self.root,
+            lark_identity="bot",
+            input_target_type="folder",
+            input_target_token="inputtoken",
+            output_target_type="folder",
+            output_target_token="outputtoken",
+            dreamina_node=sys.executable,
+            dreamina_runner=self.runner,
+            dreamina_browser=self.browser,
+            dreamina_profile_dir=self.root / "profile",
+            dreamina_diagnostics_dir=self.root / "diagnostics",
+            dreamina_timeout_seconds=60,
+        )
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_runner_result_must_be_a_real_transparent_png(self):
+        self.runner.write_text(
+            """from pathlib import Path
+import sys
+from PIL import Image
+output = Path(sys.argv[sys.argv.index('--output') + 1])
+image = Image.new('RGBA', (100, 100), (255, 0, 0, 255))
+alpha = Image.new('L', image.size, 255)
+alpha.paste(0, (0, 0, 50, 100))
+image.putalpha(alpha)
+image.save(output, format='PNG')
+print('{\"ok\":true}')
+""",
+            encoding="utf-8",
+        )
+        destination = self.root / "result.png"
+        result = artifact_relay.DreaminaAgentCutout(self.config).cutout(
+            self.source, destination
+        )
+        self.assertEqual(result, destination)
+        transparent, opaque, total = artifact_relay.png_alpha_counts(destination)
+        self.assertEqual((transparent, opaque, total), (5000, 5000, 10000))
+
+    def test_login_failure_is_public_and_never_creates_an_output(self):
+        self.runner.write_text(
+            "print('{\"ok\":false,\"code\":\"login_required\"}')\nraise SystemExit(21)\n",
+            encoding="utf-8",
+        )
+        destination = self.root / "result.png"
+        with self.assertRaises(artifact_relay.JobError) as caught:
+            artifact_relay.DreaminaAgentCutout(self.config).cutout(
+                self.source, destination
+            )
+        self.assertEqual(caught.exception.code, "dreamina_login_required")
+        self.assertFalse(destination.exists())
+
+    def test_cutout_subprocess_environment_does_not_receive_relay_secrets(self):
+        self.runner.write_text("raise SystemExit(1)\n", encoding="utf-8")
+        completed = artifact_relay.subprocess.CompletedProcess(
+            [], 1, '{"ok":false,"code":"submit_failed"}\n', ""
+        )
+        with mock.patch.object(
+            artifact_relay.subprocess, "run", return_value=completed
+        ) as run, self.assertRaises(artifact_relay.JobError):
+            artifact_relay.DreaminaAgentCutout(self.config).cutout(
+                self.source, self.root / "result.png"
+            )
+        environment = run.call_args.kwargs["env"]
+        self.assertNotIn("ARTIFACT_RELAY_API_KEY", environment)
+        self.assertNotIn("ARTIFACT_RELAY_UPSTREAM_API_KEY", environment)
+        self.assertNotIn("secret-api-key", json.dumps(environment))
+
+    def test_timeout_before_submission_is_not_reported_as_unknown_completion(self):
+        before_submit = json.dumps(
+            {"event": "cutout_failed", "kind": "timeout", "stage": "page_load"}
+        )
+        after_submit = json.dumps(
+            {"event": "cutout_failed", "kind": "timeout", "stage": "result_wait"}
+        )
+        ambiguous_submit = json.dumps(
+            {
+                "event": "cutout_failed",
+                "kind": "completion_unknown",
+                "stage": "single_submit",
+            }
+        )
+        self.assertEqual(
+            artifact_relay.DreaminaAgentCutout._runner_error_code(before_submit),
+            "dreamina_page_changed",
+        )
+        self.assertEqual(
+            artifact_relay.DreaminaAgentCutout._runner_error_code(after_submit),
+            "dreamina_completion_unknown",
+        )
+        self.assertEqual(
+            artifact_relay.DreaminaAgentCutout._runner_error_code(ambiguous_submit),
+            "dreamina_completion_unknown",
+        )
 
 
 if __name__ == "__main__":

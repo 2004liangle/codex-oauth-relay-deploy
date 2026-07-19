@@ -8,7 +8,8 @@ Use `gpt-image-2`. It supports generation, editing, multiple reference images, m
 
 - Model availability depends on the relay's authenticated Codex account. Do not silently switch models after an unsupported-model error.
 - Do not set `input_fidelity` for `gpt-image-2`; the API always processes every image input at high fidelity.
-- The direct `gpt-image-2` route does not currently provide reliable `background=transparent` output. Transparent output is supported only through `artifact-generate` or `artifact-edit`, where the client first requires advertised Alpha validation and the artifact service applies local background removal when necessary.
+- The direct `gpt-image-2` route does not currently provide reliable `background=transparent` output. For an actual cutout, background removal, isolated subject, or transparent PNG asset, use `artifact-cutout`; it sends one source image to the server's fixed Dreamina Agent workflow and requires server-side Alpha validation.
+- `artifact-generate` and `artifact-edit` retain `background=transparent` only for compatibility with older transparent generation/edit jobs. This option is not the dedicated cutout route.
 
 Bundled client defaults are `gpt-image-2`, `quality=low`, `size=1024x1024`, `output_format=png`, `background=auto`, `moderation=auto`, `n=1`, non-streaming, and a 300-second timeout. Override them only to serve the request.
 
@@ -22,7 +23,7 @@ Bundled client defaults are `gpt-image-2`, `quality=low`, `size=1024x1024`, `out
 | `output_compression` | integer `0`-`100` | CLI: `--compression`. Send only for JPEG or WebP. Higher values preserve more detail and create larger files. |
 | `n` | integer `1`-`10` | Variants of one prompt. Use separate jobs and prompts for distinct assets. |
 | `moderation` | `auto`, `low` | Keep `auto` unless the user has a valid reason for the supported lower setting. |
-| `background` | `auto`, `opaque`; `transparent` in artifact mode | Transparent output requires PNG and server-side artifact delivery. The default general model includes fine-hair Alpha refinement and should be tried first; use `--cutout-model isnet-anime` when a flat-color illustration loses its outer contour. |
+| `background` | `auto`, `opaque`; `transparent` in artifact generation/edit mode | Transparent output requires PNG and server-side artifact delivery. Use `artifact-cutout`, not this compatibility option, when the user's intent is background removal. |
 
 ## `gpt-image-2` size validation
 
@@ -69,7 +70,7 @@ Treat `size` as the requested size, then inspect the decoded file. The current C
 
 ## Streaming
 
-Streaming and partial previews are available only with the direct `generate`/`edit` commands. `artifact-generate` and `artifact-edit` deliver completed files through Lark and reject these options.
+Streaming and partial previews are available only with the direct `generate`/`edit` commands. `artifact-generate`, `artifact-edit`, and `artifact-cutout` deliver completed files through Lark and reject these options.
 
 | Parameter | Values | Guidance |
 | --- | --- | --- |

@@ -98,6 +98,7 @@ class FakeRelayHandler(BaseHTTPRequestHandler):
     requests: list[dict[str, object]] = []
     artifact_jobs: dict[str, dict[str, object]] = {}
     advertise_transparent = True
+    advertise_cutout = True
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -126,7 +127,7 @@ class FakeRelayHandler(BaseHTTPRequestHandler):
                 "delivery": "lark_drive",
                 "input_target": {"type": "wiki", "token": "wikiInputToken"},
                 "identity": "bot",
-                "operations": ["image.generate", "image.edit", "attachment.process"],
+                "operations": ["image.generate", "image.edit", "artifact.handoff"],
                 "retention": "manual",
                 "status_values": [
                     "queued",
@@ -141,8 +142,14 @@ class FakeRelayHandler(BaseHTTPRequestHandler):
             if self.advertise_transparent:
                 capabilities["transparent_output"] = {
                     "format": "png",
-                    "models": ["isnet-general-use", "isnet-anime"],
-                    "default_model": "isnet-general-use",
+                    "alpha_validation": True,
+                }
+            if self.advertise_cutout:
+                capabilities["operations"].append("image.cutout")
+                capabilities["cutout"] = {
+                    "provider": "dreamina_agent",
+                    "format": "png",
+                    "max_inputs": 1,
                     "alpha_validation": True,
                 }
             self._send_json(200, capabilities)
@@ -218,13 +225,19 @@ class FakeRelayHandler(BaseHTTPRequestHandler):
 
 
 class RelayServer:
-    def __init__(self, advertise_transparent: bool = True):
+    def __init__(
+        self,
+        advertise_transparent: bool = True,
+        advertise_cutout: bool = True,
+    ):
         self.advertise_transparent = advertise_transparent
+        self.advertise_cutout = advertise_cutout
 
     def __enter__(self) -> "RelayServer":
         FakeRelayHandler.requests = []
         FakeRelayHandler.artifact_jobs = {}
         FakeRelayHandler.advertise_transparent = self.advertise_transparent
+        FakeRelayHandler.advertise_cutout = self.advertise_cutout
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeRelayHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -241,6 +254,16 @@ class RelayServer:
 
 
 class ValidationTests(unittest.TestCase):
+    def test_skill_routes_background_removal_to_artifact_cutout(self) -> None:
+        skill = (ROOT / "skills/relay-images/SKILL.md").read_text(encoding="utf-8")
+        options = (ROOT / "skills/relay-images/references/image-options.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("transparent PNG: `artifact-cutout`", skill)
+        self.assertIn("fixed Dreamina Agent", skill)
+        self.assertIn("not the dedicated cutout route", options)
+        self.assertNotIn("--cutout-model", skill + options)
+
     def test_url_normalization_and_http_guard(self) -> None:
         value, parsed = relay_images.normalize_base_url("http://127.0.0.1:8317", False)
         self.assertEqual(value, "http://127.0.0.1:8317/v1")
@@ -450,6 +473,28 @@ class ValidationTests(unittest.TestCase):
             relay_images.validate_request_id("../escape")
         with self.assertRaises(relay_images.RelayError):
             relay_images.validate_request_id("short")
+
+    def test_cutout_capability_requires_validated_dreamina_agent(self) -> None:
+        valid = {
+            "operations": ["image.cutout"],
+            "cutout": {
+                "provider": "dreamina_agent",
+                "format": "png",
+                "max_inputs": 1,
+                "alpha_validation": True,
+            },
+        }
+        relay_images.require_cutout_artifact_output(valid)
+        for field, value in (
+            ("provider", "local_model"),
+            ("format", "webp"),
+            ("max_inputs", 2),
+            ("alpha_validation", False),
+        ):
+            invalid = {"operations": ["image.cutout"], "cutout": dict(valid["cutout"])}
+            invalid["cutout"][field] = value
+            with self.subTest(field=field), self.assertRaises(relay_images.RelayError):
+                relay_images.require_cutout_artifact_output(invalid)
 
     def test_lark_error_is_redacted_and_retryable(self) -> None:
         secret = "sensitive-upstream-message"
@@ -682,8 +727,6 @@ class CliIntegrationTests(unittest.TestCase):
                 "transparent",
                 "--format",
                 "png",
-                "--cutout-model",
-                "isnet-anime",
                 extra_env={
                     "FAKE_LARK_DOWNLOAD": str(remote),
                     "FAKE_LARK_FAIL_ONCE": str(marker),
@@ -709,9 +752,7 @@ class CliIntegrationTests(unittest.TestCase):
             ]
             payload = json.loads(artifact_posts[0]["body"])
             self.assertEqual(payload["parameters"]["background"], "transparent")
-            self.assertEqual(
-                payload["parameters"]["background_removal_model"], "isnet-anime"
-            )
+            self.assertNotIn("background_removal_model", payload["parameters"])
 
     def test_artifact_edit_uploads_validated_input_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory, RelayServer() as relay:
@@ -783,8 +824,6 @@ class CliIntegrationTests(unittest.TestCase):
                     "job-dry-run",
                     "--background",
                     "transparent",
-                    "--cutout-model",
-                    "isnet-anime",
                     "--output",
                     str(output),
                     "--dry-run",
@@ -799,9 +838,93 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             plan = json.loads(result.stdout)
             self.assertEqual(plan["payload"]["request_id"], "job-dry-run")
-            self.assertEqual(
-                plan["payload"]["parameters"]["background_removal_model"], "isnet-anime"
+            self.assertNotIn("background_removal_model", plan["payload"]["parameters"])
+            self.assertFalse(output.exists())
+
+    def test_artifact_cutout_uploads_one_image_and_sends_no_generation_options(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, RelayServer() as relay:
+            root = Path(directory)
+            lark = root / "lark-cli"
+            remote = root / "remote.png"
+            source = root / "person.png"
+            output = root / "person-cutout.png"
+            store = root / "store"
+            store.mkdir()
+            write_fake_lark_cli(lark)
+            remote.write_bytes(PNG)
+            source.write_bytes(PNG)
+
+            result = self.run_cli(
+                relay.base_url,
+                "artifact-cutout",
+                "--image",
+                str(source),
+                "--request-id",
+                "job-cutout-1",
+                "--output",
+                str(output),
+                "--lark-cli",
+                str(lark),
+                "--poll-interval",
+                "0.01",
+                "--wait-timeout",
+                "5",
+                "--timeout",
+                "2",
+                extra_env={
+                    "FAKE_LARK_DOWNLOAD": str(remote),
+                    "FAKE_LARK_STORE": str(store),
+                },
             )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_bytes(), PNG)
+            summary = json.loads(result.stdout)
+            self.assertEqual(summary["operation"], "image.cutout")
+            self.assertEqual(summary["request_id"], "job-cutout-1")
+            artifact_posts = [
+                item
+                for item in FakeRelayHandler.requests
+                if item["method"] == "POST" and item["path"] == "/v1/artifact-jobs"
+            ]
+            self.assertEqual(len(artifact_posts), 1)
+            payload = json.loads(artifact_posts[0]["body"])
+            self.assertEqual(payload["operation"], "image.cutout")
+            self.assertEqual(payload["parameters"], {})
+            self.assertEqual(len(payload["inputs"]), 1)
+            self.assertEqual(payload["inputs"][0]["role"], "image")
+            self.assertEqual(payload["inputs"][0]["sha256"], hashlib.sha256(PNG).hexdigest())
+            for forbidden in ("prompt", "model", "quality", "size", "background"):
+                self.assertNotIn(forbidden, payload["parameters"])
+            uploaded = list(store.iterdir())
+            self.assertEqual(len(uploaded), 1)
+            self.assertEqual(uploaded[0].read_bytes(), PNG)
+
+    def test_artifact_cutout_is_blocked_before_upload_on_old_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, RelayServer(advertise_cutout=False) as relay:
+            source = Path(directory) / "person.png"
+            output = Path(directory) / "person-cutout.png"
+            source.write_bytes(PNG)
+            result = self.run_cli(
+                relay.base_url,
+                "artifact-cutout",
+                "--image",
+                str(source),
+                "--request-id",
+                "job-cutout-old-server",
+                "--output",
+                str(output),
+                "--request-retries",
+                "0",
+            )
+            self.assertEqual(result.returncode, relay_images.EXIT_ROUTE, result.stderr)
+            self.assertIn("job was not submitted", result.stderr)
+            artifact_posts = [
+                item
+                for item in FakeRelayHandler.requests
+                if item["method"] == "POST" and item["path"] == "/v1/artifact-jobs"
+            ]
+            self.assertEqual(artifact_posts, [])
             self.assertFalse(output.exists())
 
     def test_transparent_artifact_is_not_submitted_to_an_old_server(self) -> None:
