@@ -50,7 +50,7 @@ STATUS_VALUES = (
     "failed",
 )
 TERMINAL_STATUSES = {"ready_for_processing", "completed", "failed"}
-OPERATIONS = ("image.generate", "image.edit", "artifact.handoff")
+OPERATIONS = ("image.generate", "image.edit", "image.cutout", "artifact.handoff")
 REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}\Z")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{6,200}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -67,10 +67,17 @@ IMAGE_PARAMETER_NAMES = {
     "size",
     "user",
 }
-LOCAL_IMAGE_PARAMETER_NAMES = {"output_name"}
+LOCAL_IMAGE_PARAMETER_NAMES = {"background_removal_model", "output_name"}
+CUTOUT_PARAMETER_NAMES = {"output_name"}
 IMAGE_MIME = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
 IMAGE_EXTENSION = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
 ACTIVE_STATUSES = {"queued", "downloading", "processing", "uploading"}
+BACKGROUND_REMOVAL_MODELS = frozenset({"isnet-general-use", "isnet-anime"})
+ALPHA_COVERAGE_DIVISOR = 1000
+ALPHA_NEAR_OPAQUE = 240
+ALPHA_NEAR_TRANSPARENT = 15
+MAX_CUTOUT_EDGE = 8192
+MAX_CUTOUT_PIXELS = 16_777_216
 
 
 def utc_now() -> str:
@@ -109,6 +116,19 @@ class Config:
     input_target_token: str
     output_target_type: str
     output_target_token: str
+    background_removal_python: str = "/opt/codex-artifact-relay/venv/bin/python"
+    background_removal_script: Path = Path("/opt/codex-artifact-relay/remove_background.py")
+    background_removal_model_dir: Path = Path("/var/lib/codex-artifact-relay/models")
+    background_removal_model: str = "isnet-general-use"
+    background_removal_timeout_seconds: int = 600
+    dreamina_node: str = "/usr/bin/node"
+    dreamina_runner: Path = Path("/opt/codex-artifact-relay/dreamina_agent_cutout.mjs")
+    dreamina_browser: Path = Path("/opt/codex-artifact-relay/chromium/chrome")
+    dreamina_profile_dir: Path = Path("/var/lib/codex-artifact-relay/dreamina-profile")
+    dreamina_diagnostics_dir: Path = Path(
+        "/var/lib/codex-artifact-relay/dreamina-diagnostics"
+    )
+    dreamina_timeout_seconds: int = 900
     prlimit_cli: str = "/usr/bin/prlimit"
     host: str = "127.0.0.1"
     port: int = 18318
@@ -130,6 +150,13 @@ class Config:
         identity = os.environ.get("ARTIFACT_RELAY_LARK_IDENTITY", "bot")
         if identity not in {"bot", "user"}:
             raise ValueError("ARTIFACT_RELAY_LARK_IDENTITY must be bot or user")
+        background_removal_model = os.environ.get(
+            "ARTIFACT_RELAY_BACKGROUND_REMOVAL_MODEL", "isnet-general-use"
+        )
+        if background_removal_model not in BACKGROUND_REMOVAL_MODELS:
+            raise ValueError(
+                "ARTIFACT_RELAY_BACKGROUND_REMOVAL_MODEL must be isnet-general-use or isnet-anime"
+            )
         return cls(
             api_key=api_key,
             state_dir=Path(os.environ.get("ARTIFACT_RELAY_STATE_DIR", "/var/lib/codex-artifact-relay")),
@@ -145,6 +172,54 @@ class Config:
             input_target_token=input_token,
             output_target_type=output_type,
             output_target_token=output_token,
+            background_removal_python=os.environ.get(
+                "ARTIFACT_RELAY_BACKGROUND_REMOVAL_PYTHON",
+                "/opt/codex-artifact-relay/venv/bin/python",
+            ),
+            background_removal_script=Path(
+                os.environ.get(
+                    "ARTIFACT_RELAY_BACKGROUND_REMOVAL_SCRIPT",
+                    "/opt/codex-artifact-relay/remove_background.py",
+                )
+            ),
+            background_removal_model_dir=Path(
+                os.environ.get(
+                    "ARTIFACT_RELAY_BACKGROUND_REMOVAL_MODEL_DIR",
+                    "/var/lib/codex-artifact-relay/models",
+                )
+            ),
+            background_removal_model=background_removal_model,
+            background_removal_timeout_seconds=env_int(
+                "ARTIFACT_RELAY_BACKGROUND_REMOVAL_TIMEOUT", 600, 30, 3600
+            ),
+            dreamina_node=os.environ.get("ARTIFACT_RELAY_DREAMINA_NODE", "/usr/bin/node"),
+            dreamina_runner=Path(
+                os.environ.get(
+                    "ARTIFACT_RELAY_DREAMINA_RUNNER",
+                    "/opt/codex-artifact-relay/dreamina_agent_cutout.mjs",
+                )
+            ),
+            dreamina_browser=Path(
+                os.environ.get(
+                    "ARTIFACT_RELAY_DREAMINA_BROWSER",
+                    "/opt/codex-artifact-relay/chromium/chrome",
+                )
+            ),
+            dreamina_profile_dir=Path(
+                os.environ.get(
+                    "ARTIFACT_RELAY_DREAMINA_PROFILE_DIR",
+                    "/var/lib/codex-artifact-relay/dreamina-profile",
+                )
+            ),
+            dreamina_diagnostics_dir=Path(
+                os.environ.get(
+                    "ARTIFACT_RELAY_DREAMINA_DIAGNOSTICS_DIR",
+                    "/var/lib/codex-artifact-relay/dreamina-diagnostics",
+                )
+            ),
+            dreamina_timeout_seconds=env_int(
+                "ARTIFACT_RELAY_DREAMINA_TIMEOUT", 900, 60, 3600
+            ),
             host=os.environ.get("ARTIFACT_RELAY_HOST", "127.0.0.1"),
             port=env_int("ARTIFACT_RELAY_PORT", 18318, 1, 65535),
             worker_count=env_int("ARTIFACT_RELAY_WORKERS", 2, 1, 4),
@@ -330,7 +405,24 @@ def validate_input(value: object, index: int, max_input_bytes: int) -> dict[str,
 
 
 def validate_operation(operation: str, parameters: dict[str, object], inputs: list[dict[str, object]]) -> None:
-    if operation.startswith("image."):
+    if operation == "image.cutout":
+        unknown = sorted(set(parameters) - CUTOUT_PARAMETER_NAMES)
+        if unknown:
+            raise ApiError(
+                400,
+                "invalid_parameters",
+                f"unsupported cutout parameters: {', '.join(unknown)}",
+            )
+        output_name = parameters.get("output_name")
+        if output_name is not None and (
+            not isinstance(output_name, str) or safe_filename(output_name, "") != output_name
+        ):
+            raise ApiError(400, "invalid_parameters", "parameters.output_name must be a safe base name")
+        if len(inputs) != 1 or inputs[0].get("role", "image") != "image":
+            raise ApiError(400, "invalid_inputs", "image.cutout requires exactly one image")
+        return
+
+    if operation in {"image.generate", "image.edit"}:
         unknown = sorted(set(parameters) - IMAGE_PARAMETER_NAMES - LOCAL_IMAGE_PARAMETER_NAMES)
         if unknown:
             raise ApiError(400, "invalid_parameters", f"unsupported image parameters: {', '.join(unknown)}")
@@ -345,6 +437,28 @@ def validate_operation(operation: str, parameters: dict[str, object], inputs: li
             not isinstance(output_name, str) or safe_filename(output_name, "") != output_name
         ):
             raise ApiError(400, "invalid_parameters", "parameters.output_name must be a safe base name")
+        background = parameters.get("background")
+        if background is not None and (
+            not isinstance(background, str) or background not in {"auto", "opaque", "transparent"}
+        ):
+            raise ApiError(400, "invalid_parameters", "parameters.background is invalid")
+        removal_model = parameters.get("background_removal_model")
+        if removal_model is not None and (
+            not isinstance(removal_model, str) or removal_model not in BACKGROUND_REMOVAL_MODELS
+        ):
+            raise ApiError(
+                400,
+                "invalid_parameters",
+                "parameters.background_removal_model must be isnet-general-use or isnet-anime",
+            )
+        if removal_model is not None and background != "transparent":
+            raise ApiError(
+                400,
+                "invalid_parameters",
+                "parameters.background_removal_model requires background=transparent",
+            )
+        if background == "transparent" and parameters.get("output_format", "png") != "png":
+            raise ApiError(400, "invalid_parameters", "transparent output requires output_format=png")
     if operation == "image.generate" and inputs:
         raise ApiError(400, "invalid_inputs", "image.generate does not accept inputs")
     if operation == "image.edit":
@@ -756,9 +870,367 @@ def find_file_token(value: object) -> str | None:
     return None
 
 
-class ImageBackend:
+def png_alpha_counts(path: Path) -> tuple[int, int, int] | None:
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError as exc:
+        raise JobError(
+            "background_removal_unavailable",
+            "transparent output validation is not installed",
+            False,
+        ) from exc
+
+    try:
+        with Image.open(path) as image:
+            if (
+                image.width <= 0
+                or image.height <= 0
+                or image.width > MAX_CUTOUT_EDGE
+                or image.height > MAX_CUTOUT_EDGE
+                or image.width * image.height > MAX_CUTOUT_PIXELS
+            ):
+                raise JobError(
+                    "transparent_output_dimensions_unsupported",
+                    "transparent output dimensions exceed the local cutout limit",
+                    False,
+                )
+            if image.format != "PNG":
+                return None
+            image.load()
+            if "A" in image.getbands():
+                alpha = image.getchannel("A")
+            elif "transparency" in image.info:
+                alpha = image.convert("RGBA").getchannel("A")
+            else:
+                return None
+            histogram = alpha.histogram()
+            total = image.width * image.height
+    except JobError:
+        raise
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError, ValueError) as exc:
+        raise JobError(
+            "transparent_output_invalid",
+            "transparent output could not be decoded as PNG",
+            False,
+        ) from exc
+
+    transparent = sum(histogram[: ALPHA_NEAR_TRANSPARENT + 1])
+    opaque = sum(histogram[ALPHA_NEAR_OPAQUE:])
+    return transparent, opaque, total
+
+
+class BackgroundRemover:
     def __init__(self, config: Config):
         self.config = config
+        self._lock = threading.Lock()
+
+    def ensure_transparent(self, path: Path, requested_model: object = None) -> Path:
+        alpha = png_alpha_counts(path)
+        if alpha is not None:
+            transparent, opaque, total = alpha
+            required = max(1, (total + ALPHA_COVERAGE_DIVISOR - 1) // ALPHA_COVERAGE_DIVISOR)
+            if transparent >= required and opaque >= required:
+                return path
+            if transparent >= required and opaque < required:
+                raise JobError(
+                    "transparent_output_empty",
+                    "transparent output contains too few visible foreground pixels",
+                    False,
+                )
+
+        model = (
+            requested_model
+            if isinstance(requested_model, str)
+            else self.config.background_removal_model
+        )
+        if model not in BACKGROUND_REMOVAL_MODELS:
+            raise JobError(
+                "background_removal_unavailable",
+                "the requested background removal model is unavailable",
+                False,
+            )
+
+        destination = path.with_suffix(".png")
+        temporary = destination.with_name(f".{destination.name}.cutout-{uuid.uuid4().hex}.png")
+        environment = {
+            "HOME": str(self.config.state_dir),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "OMP_NUM_THREADS": "2",
+            "U2NET_HOME": str(self.config.background_removal_model_dir),
+            "XDG_CACHE_HOME": str(self.config.state_dir / "cache"),
+        }
+        command = [
+            self.config.background_removal_python,
+            str(self.config.background_removal_script),
+            "remove",
+            "--model",
+            model,
+            "--input",
+            str(path),
+            "--output",
+            str(temporary),
+        ]
+        try:
+            with self._lock:
+                completed = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=self.config.background_removal_timeout_seconds,
+                    env=environment,
+                    check=False,
+                )
+            if completed.returncode != 0 or not temporary.is_file():
+                raise JobError(
+                    "background_removal_failed",
+                    "local background removal failed; output was not uploaded",
+                    False,
+                )
+            alpha = png_alpha_counts(temporary)
+            if alpha is None:
+                raise JobError(
+                    "transparent_output_unavailable",
+                    "background removal did not produce a usable transparent PNG",
+                    False,
+                )
+            required = max(
+                1,
+                (alpha[2] + ALPHA_COVERAGE_DIVISOR - 1) // ALPHA_COVERAGE_DIVISOR,
+            )
+            if alpha[0] < required or alpha[1] < required:
+                raise JobError(
+                    "transparent_output_unavailable",
+                    "background removal did not produce a usable transparent PNG",
+                    False,
+                )
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            if destination != path and destination.exists():
+                raise JobError(
+                    "invalid_output",
+                    "transparent PNG output path already exists",
+                    False,
+                )
+            os.replace(temporary, destination)
+            if destination != path:
+                path.unlink(missing_ok=True)
+            return destination
+        except subprocess.TimeoutExpired as exc:
+            raise JobError(
+                "background_removal_timeout",
+                "local background removal timed out; output was not uploaded",
+                False,
+            ) from exc
+        except OSError as exc:
+            raise JobError(
+                "background_removal_unavailable",
+                "local background removal could not be started",
+                False,
+            ) from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+class DreaminaAgentCutout:
+    """Serialize cutout work through the logged-in Dreamina Agent browser."""
+
+    def __init__(self, config: Config):
+        self.config = config
+        self._lock = threading.Lock()
+
+    def cutout(self, source: Path, destination: Path) -> Path:
+        if not source.is_file() or source.is_symlink():
+            raise JobError("invalid_input", "cutout input is not a regular file", False)
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.config.dreamina_profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.config.dreamina_diagnostics_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = destination.with_name(
+            f".{destination.name}.dreamina-{uuid.uuid4().hex}.png"
+        )
+        diagnostics = self.config.dreamina_diagnostics_dir / destination.stem
+        diagnostics.mkdir(parents=True, exist_ok=True, mode=0o700)
+        command = [
+            self.config.dreamina_node,
+            str(self.config.dreamina_runner),
+            "--browser",
+            str(self.config.dreamina_browser),
+            "--profile",
+            str(self.config.dreamina_profile_dir),
+            "--input",
+            str(source),
+            "--output",
+            str(temporary),
+            "--timeout",
+            str(self.config.dreamina_timeout_seconds),
+            "--diagnostics-dir",
+            str(diagnostics),
+        ]
+        environment = {
+            "HOME": str(self.config.state_dir),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "XDG_CACHE_HOME": str(self.config.state_dir / "cache"),
+            "XDG_CONFIG_HOME": str(self.config.state_dir / "config"),
+            "XDG_RUNTIME_DIR": str(self.config.state_dir / "runtime"),
+        }
+        try:
+            if not self.config.dreamina_runner.is_file():
+                raise JobError(
+                    "dreamina_unavailable", "Dreamina Agent runner is not installed", False
+                )
+            if not self.config.dreamina_browser.is_file():
+                raise JobError(
+                    "dreamina_unavailable", "Dreamina Agent browser is not installed", False
+                )
+            (self.config.state_dir / "runtime").mkdir(parents=True, exist_ok=True, mode=0o700)
+            with self._lock:
+                completed = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=self.config.dreamina_timeout_seconds + 30,
+                    env=environment,
+                    check=False,
+                )
+            if completed.returncode != 0 or not temporary.is_file():
+                code = self._runner_error_code(completed.stdout)
+                raise JobError(code, self._runner_error_message(code), False)
+            alpha = png_alpha_counts(temporary)
+            if alpha is None:
+                raise JobError(
+                    "transparent_output_unavailable",
+                    "Dreamina Agent did not return a transparent PNG",
+                    False,
+                )
+            required = max(
+                1,
+                (alpha[2] + ALPHA_COVERAGE_DIVISOR - 1) // ALPHA_COVERAGE_DIVISOR,
+            )
+            if alpha[0] < required or alpha[1] < required:
+                raise JobError(
+                    "transparent_output_unavailable",
+                    "Dreamina Agent returned an empty or opaque PNG",
+                    False,
+                )
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            if destination.exists() and destination != source:
+                raise JobError("invalid_output", "cutout output path already exists", False)
+            os.replace(temporary, destination)
+            return destination
+        except subprocess.TimeoutExpired as exc:
+            raise JobError(
+                "dreamina_completion_unknown",
+                "Dreamina Agent timed out after submission; the job was not retried",
+                False,
+            ) from exc
+        except JobError:
+            raise
+        except OSError as exc:
+            raise JobError(
+                "dreamina_unavailable", "Dreamina Agent could not be started", False
+            ) from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def ensure_transparent(self, path: Path, requested_model: object = None) -> Path:
+        del requested_model
+        alpha = png_alpha_counts(path)
+        if alpha is not None:
+            required = max(
+                1,
+                (alpha[2] + ALPHA_COVERAGE_DIVISOR - 1) // ALPHA_COVERAGE_DIVISOR,
+            )
+            if alpha[0] >= required and alpha[1] >= required:
+                return path
+        destination = path.with_suffix(".png")
+        result = self.cutout(path, destination)
+        if destination != path:
+            path.unlink(missing_ok=True)
+        return result
+
+    @staticmethod
+    def _runner_error_code(output: str) -> str:
+        allowed = {
+            "browser_start_failed",
+            "download_failed",
+            "login_required",
+            "no_result",
+            "page_changed",
+            "submit_failed",
+            "timeout",
+            "upload_failed",
+        }
+        for line in reversed(output.splitlines()):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(value, dict):
+                continue
+            code = value.get("code")
+            if isinstance(code, str) and code in allowed:
+                if code == "timeout":
+                    return "dreamina_completion_unknown"
+                return f"dreamina_{code}"
+            kind = value.get("kind")
+            stage = value.get("stage")
+            mapped = {
+                "browser_start": "dreamina_browser_start_failed",
+                "download_failed": "dreamina_download_failed",
+                "login_expired": "dreamina_login_required",
+                "no_result": "dreamina_no_result",
+                "upload_failed": "dreamina_upload_failed",
+            }.get(kind)
+            if mapped:
+                return mapped
+            if kind == "timeout":
+                if stage == "startup":
+                    return "dreamina_browser_start_failed"
+                if stage == "input_upload":
+                    return "dreamina_upload_failed"
+                if stage in {"page_load", "prompt_entry"}:
+                    return "dreamina_page_changed"
+                return "dreamina_completion_unknown"
+            if kind == "completion_unknown":
+                return "dreamina_completion_unknown"
+            if kind == "workflow" and stage == "single_submit":
+                return "dreamina_submit_failed"
+            if kind == "workflow":
+                return "dreamina_page_changed"
+        return "dreamina_failed"
+
+    @staticmethod
+    def _runner_error_message(code: str) -> str:
+        messages = {
+            "dreamina_login_required": "Dreamina Agent login has expired",
+            "dreamina_completion_unknown": (
+                "Dreamina Agent completion is unknown; the job was not retried"
+            ),
+            "dreamina_upload_failed": "Dreamina Agent could not upload the source image",
+            "dreamina_no_result": "Dreamina Agent completed without a downloadable result",
+            "dreamina_download_failed": "Dreamina Agent result download failed",
+            "dreamina_page_changed": "Dreamina Agent page structure is unsupported",
+            "dreamina_browser_start_failed": "Dreamina Agent browser could not start",
+            "dreamina_submit_failed": "Dreamina Agent request could not be submitted",
+        }
+        return messages.get(code, "Dreamina Agent cutout failed")
+
+
+class ImageBackend:
+    def __init__(
+        self,
+        config: Config,
+        background_remover: BackgroundRemover | DreaminaAgentCutout | None = None,
+    ):
+        self.config = config
+        self.background_remover = background_remover or DreaminaAgentCutout(config)
 
     def generate(self, parameters: Mapping[str, object], output_dir: Path, request_id: str) -> list[Path]:
         payload = self._upstream_parameters(parameters)
@@ -780,9 +1252,29 @@ class ImageBackend:
         response = self._multipart_request("images/edits", fields, files)
         return self._save_response_images(response, parameters, output_dir, request_id)
 
+    def cutout(
+        self,
+        parameters: Mapping[str, object],
+        inputs: Sequence[tuple[Mapping[str, object], Path]],
+        output_dir: Path,
+        request_id: str,
+    ) -> list[Path]:
+        if len(inputs) != 1:
+            raise JobError("invalid_inputs", "cutout requires exactly one source image", False)
+        output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        base_name = safe_filename(parameters.get("output_name"), f"{request_id}.png")
+        destination = output_dir / f"{Path(base_name).stem or request_id}.png"
+        cutout = getattr(self.background_remover, "cutout", None)
+        if not callable(cutout):
+            raise JobError("dreamina_unavailable", "Dreamina Agent cutout is unavailable", False)
+        return [cutout(inputs[0][1], destination)]
+
     @staticmethod
     def _upstream_parameters(parameters: Mapping[str, object]) -> dict[str, object]:
-        return {key: value for key, value in parameters.items() if key in IMAGE_PARAMETER_NAMES}
+        result = {key: value for key, value in parameters.items() if key in IMAGE_PARAMETER_NAMES}
+        if result.get("background") == "transparent":
+            result["background"] = "auto"
+        return result
 
     def _json_request(self, suffix: str, payload: Mapping[str, object]) -> dict[str, object]:
         body = canonical_json(payload).encode("utf-8")
@@ -910,6 +1402,10 @@ class ImageBackend:
             suffix = f"-{index + 1}" if len(items) > 1 else ""
             path = output_dir / f"{stem}{suffix}{IMAGE_EXTENSION[image_format]}"
             atomic_write(path, data)
+            if parameters.get("background") == "transparent":
+                path = self.background_remover.ensure_transparent(
+                    path, parameters.get("background_removal_model")
+                )
             paths.append(path)
         return paths
 
@@ -1012,6 +1508,17 @@ class ArtifactService:
             "retention": "manual",
             "status_values": list(STATUS_VALUES),
             "max_input_bytes": self.config.max_input_bytes,
+            "transparent_output": {
+                "format": "png",
+                "alpha_validation": True,
+            },
+            "cutout": {
+                "provider": "dreamina_agent",
+                "format": "png",
+                "max_inputs": 1,
+                "concurrency": 1,
+                "alpha_validation": True,
+            },
         }
 
     def submit(self, value: object) -> tuple[dict[str, object], bool]:
@@ -1096,6 +1603,10 @@ class ArtifactService:
                 )
             elif operation == "image.edit":
                 output_paths = self.image_backend.edit(
+                    request["parameters"], downloaded, output_dir, request_id
+                )
+            elif operation == "image.cutout":
+                output_paths = self.image_backend.cutout(
                     request["parameters"], downloaded, output_dir, request_id
                 )
             else:

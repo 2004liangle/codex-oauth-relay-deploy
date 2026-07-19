@@ -36,6 +36,42 @@ class UsageDashboardInstallerTests(unittest.TestCase):
         self.assertIn("ARTIFACT_RELAY_WORKERS=$WORKER_COUNT", ARTIFACT_INSTALLER)
         self.assertNotIn("ARTIFACT_RELAY_WORKERS=1", ARTIFACT_INSTALLER)
 
+    def test_artifact_relay_pins_models_and_supports_an_explicit_python(self):
+        self.assertIn('PYTHON_BIN="${ARTIFACT_RELAY_PYTHON:-}"', ARTIFACT_INSTALLER)
+        self.assertIn("ARTIFACT_RELAY_PYTHON must be a safe absolute", ARTIFACT_INSTALLER)
+        self.assertRegex(
+            ARTIFACT_INSTALLER,
+            r'GENERAL_MODEL_SHA256="[0-9a-f]{64}"',
+        )
+        self.assertRegex(
+            ARTIFACT_INSTALLER,
+            r'ANIME_MODEL_SHA256="[0-9a-f]{64}"',
+        )
+        self.assertIn('sha256sum -c - >/dev/null', ARTIFACT_INSTALLER)
+        self.assertIn('ROLLBACK_KEPT=0', ARTIFACT_INSTALLER)
+
+    def test_artifact_relay_installs_persistent_dreamina_agent_cutout(self):
+        runner = ROOT / "artifact-relay" / "dreamina_agent_cutout.mjs"
+        self.assertTrue(runner.is_file())
+        runner_text = runner.read_text()
+        self.assertIn('const PROMPT = "你把人物抠出来，做成透明的png";', runner_text)
+        self.assertNotIn("精细修复人物边缘", runner_text)
+        self.assertIn('path.join(defaultProfile, "Sessions")', runner_text)
+        self.assertIn('"--profile-directory=Default"', runner_text)
+        self.assertIn('cdp.send("Target.createTarget", { url })', runner_text)
+        self.assertIn('"prompt_clicked_once"', runner_text)
+        self.assertIn('"prompt_submission_confirmed"', runner_text)
+        self.assertIn("baselineTargetIds", runner_text)
+        self.assertIn("promptMessageCount", runner_text)
+        self.assertIn("result_asset_verified", runner_text)
+        self.assertIn('DREAMINA_PROFILE_DIR="$STATE_DIR/dreamina-profile"', ARTIFACT_INSTALLER)
+        self.assertIn('ARTIFACT_RELAY_DREAMINA_BROWSER=$DREAMINA_BROWSER', ARTIFACT_INSTALLER)
+        self.assertIn('ARTIFACT_RELAY_DREAMINA_TIMEOUT=900', ARTIFACT_INSTALLER)
+        self.assertIn('image.cutout', ARTIFACT_INSTALLER)
+        self.assertIn('.cutout.provider == "dreamina_agent"', ARTIFACT_INSTALLER)
+        self.assertIn('install -o root -g root -m 0755 "$DREAMINA_RUNNER_SOURCE"', ARTIFACT_INSTALLER)
+        self.assertIn("TasksMax=384", ARTIFACT_INSTALLER)
+
     def test_static_ui_and_api_routes_are_separate(self):
         api = INSTALLER.index("location ^~ /usage/api/")
         network_summary = INSTALLER.index("location = /usage/api/v1/server-network {")

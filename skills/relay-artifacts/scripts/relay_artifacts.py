@@ -940,6 +940,39 @@ def check_capability(capabilities: Mapping[str, Any], operation: str) -> None:
         raise ToolError("unsupported_operation", "中转服务未声明支持 %s" % operation)
 
 
+def check_transparent_output(
+    capabilities: Mapping[str, Any], parameters: Mapping[str, Any]
+) -> None:
+    if parameters.get("background") != "transparent":
+        return
+    feature = capabilities.get("transparent_output")
+    if (
+        not isinstance(feature, dict)
+        or feature.get("alpha_validation") is not True
+        or feature.get("format") != "png"
+    ):
+        raise ToolError(
+            "transparent_output_unsupported",
+            "中转服务未启用真实透明 PNG 校验，任务尚未提交",
+        )
+
+
+def check_cutout_output(capabilities: Mapping[str, Any]) -> None:
+    check_capability(capabilities, "image.cutout")
+    feature = capabilities.get("cutout")
+    if (
+        not isinstance(feature, dict)
+        or feature.get("provider") != "dreamina_agent"
+        or feature.get("format") != "png"
+        or feature.get("max_inputs") != 1
+        or feature.get("alpha_validation") is not True
+    ):
+        raise ToolError(
+            "cutout_unsupported",
+            "中转服务未启用经过真实 Alpha 校验的即梦 Agent 抠图，任务尚未提交",
+        )
+
+
 def input_folder(config: Config, capabilities: Mapping[str, Any]) -> str:
     if config.lark_input_folder_token:
         return config.lark_input_folder_token
@@ -1025,6 +1058,8 @@ def verify_manifest_total(manifests: Sequence[Mapping[str, Any]], capabilities: 
 
 
 def image_parameters(args: argparse.Namespace, prompt: str) -> Dict[str, Any]:
+    if args.background == "transparent" and args.output_format != "png":
+        raise ToolError("invalid_image_options", "透明背景必须使用 PNG 格式")
     result: Dict[str, Any] = {
         "model": args.model,
         "prompt": prompt,
@@ -1109,12 +1144,14 @@ def command_generate(args: argparse.Namespace) -> Dict[str, Any]:
     capabilities = relay.capabilities()
     check_capability(capabilities, "image.generate")
     prompt = read_text(args.prompt, args.prompt_file, "prompt", required=True)
+    parameters = image_parameters(args, prompt)
+    check_transparent_output(capabilities, parameters)
     request_id = validate_request_id(args.request_id) if args.request_id else new_request_id()
     job = relay.submit(
         {
             "request_id": request_id,
             "operation": "image.generate",
-            "parameters": image_parameters(args, prompt),
+            "parameters": parameters,
             "inputs": [],
         }
     )
@@ -1137,6 +1174,8 @@ def command_submit_edit(args: argparse.Namespace) -> Dict[str, Any]:
     capabilities = relay.capabilities()
     check_capability(capabilities, "image.edit")
     prompt = read_text(args.prompt, args.prompt_file, "prompt", required=True)
+    parameters = image_parameters(args, prompt)
+    check_transparent_output(capabilities, parameters)
     manifests = input_manifests(
         args.input_manifest,
         allowed_roles=("image", "mask"),
@@ -1155,7 +1194,7 @@ def command_submit_edit(args: argparse.Namespace) -> Dict[str, Any]:
         {
             "request_id": request_id,
             "operation": "image.edit",
-            "parameters": image_parameters(args, prompt),
+            "parameters": parameters,
             "inputs": manifests,
         }
     )
@@ -1223,6 +1262,9 @@ def command_submit_job(args: argparse.Namespace) -> Dict[str, Any]:
         raise ToolError("invalid_manifest", "任务清单必须包含 request_id")
     validate_request_id(request_id)
     relay = RelayClient(load_config(args))
+    parameters = payload.get("parameters")
+    if isinstance(parameters, dict) and parameters.get("background") == "transparent":
+        check_transparent_output(relay.capabilities(), parameters)
     job = relay.submit(payload)
     if args.wait or args.wait_completed:
         job = wait_for_job(
@@ -1241,6 +1283,8 @@ def command_edit(args: argparse.Namespace) -> Dict[str, Any]:
     capabilities = relay.capabilities()
     check_capability(capabilities, "image.edit")
     prompt = read_text(args.prompt, args.prompt_file, "prompt", required=True)
+    parameters = image_parameters(args, prompt)
+    check_transparent_output(capabilities, parameters)
     images = preflight_files(args.image, 1, 16)
     mask = preflight_files([args.mask], 1, 1)[0] if args.mask else None
     all_paths = images + ([mask] if mask is not None else [])
@@ -1261,7 +1305,63 @@ def command_edit(args: argparse.Namespace) -> Dict[str, Any]:
         {
             "request_id": request_id,
             "operation": "image.edit",
-            "parameters": image_parameters(args, prompt),
+            "parameters": parameters,
+            "inputs": manifests,
+        }
+    )
+    if args.wait:
+        job = wait_for_job(
+            relay,
+            request_id,
+            timeout=args.wait_timeout,
+            interval=args.poll_interval,
+            require_completed=True,
+        )
+    elif args.download_dir:
+        raise ToolError("invalid_arguments", "使用 --download-dir 时必须同时使用 --wait")
+    return result_with_downloads(config, job, args.download_dir, args.overwrite)
+
+
+def command_cutout(args: argparse.Namespace) -> Dict[str, Any]:
+    config = load_config(args)
+    relay = RelayClient(config)
+    capabilities = relay.capabilities()
+    check_cutout_output(capabilities)
+
+    if args.input_manifest is not None:
+        manifests = input_manifests(
+            args.input_manifest,
+            allowed_roles=("image",),
+            default_role="image",
+        )
+        if len(manifests) != 1:
+            raise ToolError("invalid_input_count", "cutout 需要且只能使用一张图片清单")
+        verify_manifest_total(manifests, capabilities)
+    else:
+        image = preflight_files([args.image], 1, 1)[0]
+        mime_type = sniff_mime(image)
+        if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+            raise ToolError("invalid_image", "cutout 只支持 PNG、JPEG 或 WebP 图片")
+        verify_total_size([image], capabilities)
+        folder = input_folder(config, capabilities)
+        manifest = LarkClient(config).upload(image, folder)
+        manifest["role"] = "image"
+        manifests = [manifest]
+
+    if manifests[0]["mime_type"] not in {"image/png", "image/jpeg", "image/webp"}:
+        raise ToolError("invalid_image", "cutout 只支持 PNG、JPEG 或 WebP 图片")
+    parameters: Dict[str, Any] = {}
+    if args.output_name is not None:
+        if safe_file_name(args.output_name, "") != args.output_name:
+            raise ToolError("invalid_arguments", "--output-name 必须是安全的文件基本名")
+        parameters["output_name"] = args.output_name
+
+    request_id = validate_request_id(args.request_id) if args.request_id else new_request_id()
+    job = relay.submit(
+        {
+            "request_id": request_id,
+            "operation": "image.cutout",
+            "parameters": parameters,
             "inputs": manifests,
         }
     )
@@ -1477,7 +1577,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="用户明确接受风险后，允许使用未加密的 HTTP 中转地址",
     )
     public_commands = (
-        "{capabilities,manifest,submit-generate,generate,submit-edit,edit,"
+        "{capabilities,manifest,submit-generate,generate,submit-edit,edit,cutout,"
         "submit-handoff,handoff,status,submit-job,download}"
     )
     commands = parser.add_subparsers(
@@ -1524,6 +1624,24 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("--image", action="append", required=True, help="按顺序输入图片，最多可重复 16 次")
     edit.add_argument("--mask", help="可选，作用于第一张图片的蒙版")
     edit.set_defaults(handler=command_edit)
+
+    cutout = commands.add_parser(
+        "cutout",
+        help="用服务端即梦 Agent 抠出单张图片主体并返回真实透明 PNG",
+    )
+    cutout_source = cutout.add_mutually_exclusive_group(required=True)
+    cutout_source.add_argument("--image", help="由脚本上传的一张本地图片")
+    cutout_source.add_argument(
+        "--input-manifest",
+        action="append",
+        help="客户端已上传图片的 JSON 清单或 @文件路径；只能提供一张",
+    )
+    cutout.add_argument("--output-name", help="可选的服务端输出文件名")
+    cutout.add_argument("--request-id")
+    cutout.add_argument("--download-dir")
+    cutout.add_argument("--overwrite", action="store_true")
+    add_wait_options(cutout)
+    cutout.set_defaults(handler=command_cutout)
 
     submit_handoff = commands.add_parser(
         "submit-handoff",

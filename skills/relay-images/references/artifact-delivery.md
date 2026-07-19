@@ -40,6 +40,17 @@ python3 "$RELAY_IMAGES" artifact-edit \
 
 The edit command validates the same image count, signatures, size limits, and mask constraints as direct mode. It uploads validated snapshots in order. Image entries use `role=image`; an optional mask uses `role=mask` and applies to the first image.
 
+Dedicated background removal:
+
+```bash
+python3 "$RELAY_IMAGES" artifact-cutout \
+  --image person.png --output output/person.png
+```
+
+This command accepts one PNG, JPEG, or WebP input and submits `image.cutout` with an empty `parameters` object. Before upload, the client requires the `cutout` capability to declare `provider=dreamina_agent`, `format=png`, `max_inputs=1`, and `alpha_validation=true`. It does not accept a prompt, model, quality, size, background, or background-removal model option. The server owns the fixed Dreamina Agent instruction and completes the job only after validating a real Alpha channel.
+
+For a request that also creates or visually refines the subject, first complete and inspect the content with `artifact-generate` and/or `artifact-edit`. Submit only that finalized image once to `artifact-cutout`. Dreamina is the final transparency stage, not the content-generation or refinement stage.
+
 Asynchronous artifact delivery does not support image streaming or partial previews. Use the direct command only when the user explicitly needs those events and the link can carry Base64 reliably.
 
 ## General attachments
@@ -101,7 +112,7 @@ Create a job with exact `POST /v1/artifact-jobs`:
 }
 ```
 
-Supported operations are `image.generate`, `image.edit`, and `artifact.handoff`. Request IDs must be 8-128 characters from letters, digits, `.`, `_`, and `-`. Repeating the exact ID and payload is idempotent. Reusing an ID with a different payload returns `409`.
+Supported operations are `image.generate`, `image.edit`, `image.cutout`, and `artifact.handoff`. `image.cutout` requires exactly one `role=image` input and an empty `parameters` object. Request IDs must be 8-128 characters from letters, digits, `.`, `_`, and `-`. Repeating the exact ID and payload is idempotent. Reusing an ID with a different payload returns `409`.
 
 Poll exact `GET /v1/artifact-jobs/{request_id}`. Status values are:
 
@@ -110,7 +121,7 @@ Poll exact `GET /v1/artifact-jobs/{request_id}`. Status values are:
 - `completed`: outputs can be downloaded.
 - `failed`: inspect the structured error code and retryable flag; do not create a new image request blindly.
 
-Every input and output manifest uses `file_token`, `name`, `mime_type`, `size_bytes`, and `sha256`. Image edit inputs additionally use `role`.
+Every input and output manifest uses `file_token`, `name`, `mime_type`, `size_bytes`, and `sha256`. Image edit and cutout inputs additionally use `role`.
 
 ## Reliability and files
 

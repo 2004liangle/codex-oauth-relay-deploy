@@ -1,6 +1,6 @@
 ---
 name: relay-images
-description: "Generate and edit raster images through a user-configured OpenAI-compatible relay, including optional Lark Drive delivery for weak networks and attachment handoff. Use when the user explicitly asks for relay-based 文生图, 图生图, local reference images, multi-image composition, masks, quality or size controls, or Lark-delivered artifacts. Do not use for ordinary image requests that should use the built-in image generator, for SVG or other deterministic vector work, or for direct OpenAI Platform billing."
+description: "Generate, edit, or cut out raster images through a user-configured OpenAI-compatible relay, including Lark Drive delivery for weak networks and attachment handoff. Use when the user explicitly asks for relay-based 文生图, 图生图, 抠图, 去背景, 透明 PNG, local reference images, multi-image composition, masks, quality or size controls, or Lark-delivered artifacts. Do not use for ordinary image requests that should use the built-in image generator, for SVG or other deterministic vector work, or for direct OpenAI Platform billing."
 ---
 
 # Relay Images
@@ -27,6 +27,7 @@ Use the bundled relay client to create or edit images while keeping project file
    - Reliable/fast direct link with sources: `edit`.
    - Weak link or requested Lark delivery, no source image: `artifact-generate`.
    - Weak link or requested Lark delivery with sources/mask: `artifact-edit`.
+   - Remove a background from a finalized image, isolate its subject, or return a transparent PNG: `artifact-cutout` with exactly one source image. If the user also requests generation or visual refinement, finish that work with `generate`/`edit` first, inspect the finalized image, and then call `artifact-cutout` exactly once. Dreamina performs only the final background-removal pass.
    - General attachment handoff for later trusted processing: `artifact-handoff`.
 5. Inspect every local input image before editing. Record each image's ordered role and identify which first image a mask targets.
 6. Shape the prompt with `references/prompting.md`. Preserve the user's exact requested text, constraints, and invariants.
@@ -40,6 +41,7 @@ Use the bundled relay client to create or edit images while keeping project file
    python3 "$RELAY_IMAGES" edit --help
    python3 "$RELAY_IMAGES" artifact-generate --help
    python3 "$RELAY_IMAGES" artifact-edit --help
+   python3 "$RELAY_IMAGES" artifact-cutout --help
    ```
 
 9. Run the no-generation route check before the first real call after configuration:
@@ -68,6 +70,10 @@ Use the bundled relay client to create or edit images while keeping project file
      --image input-1.png --image input-2.png --mask mask.png \
      --prompt-file prompt.txt --quality high --format webp \
      --compression 85 --output output/edited.webp
+
+   python3 "$RELAY_IMAGES" artifact-cutout \
+     --image character.png \
+     --output output/character.png
    ```
 
    Write outputs to the user's requested path or a project-local output directory. Use `--dry-run` to inspect a redacted request plan. Add `--strict-output` when exact returned dimensions and file format are hard requirements; a mismatch is still saved with its actual extension, reported as unmet, and exits nonzero. Do not create an ad hoc curl or SDK wrapper when the bundled client supports the request.
@@ -96,6 +102,9 @@ Use the bundled relay client to create or edit images while keeping project file
 - Read `references/artifact-delivery.md` before the first artifact command in a session.
 - Let `/v1/artifact-capabilities` discover the input target and `bot`/`user` identity. Use `artifact-configure` only as an explicit local override; never hardcode target tokens in project files.
 - `artifact-edit` validates and snapshots ordered images and the mask before uploading them. The job manifest uses `role=image` in order and one final `role=mask` when present.
+- `artifact-cutout` accepts exactly one PNG, JPEG, or WebP source, submits `image.cutout` with no prompt/model/quality/background parameters, and downloads one validated PNG. The server uses its fixed Dreamina Agent workflow and validates real Alpha before completion.
+- Do not combine character generation, styling changes, edge refinement, and final transparency into one Dreamina instruction. Complete visual content on the normal image route, then send only the finalized image through `artifact-cutout`.
+- Keep `--background transparent --format png` available on `artifact-generate` and `artifact-edit` only for compatibility with older transparent generation/edit jobs. It is not the dedicated background-removal route and must not replace `artifact-cutout` for a cutout request.
 - Use `artifact-handoff --file ... --instruction ...` for non-image attachments. `ready_for_processing` means the files were downloaded and verified by the server; it does not mean later processing is complete.
 - Inputs and results are retained in Lark until the user explicitly deletes them. Never add automatic expiry or cleanup.
 

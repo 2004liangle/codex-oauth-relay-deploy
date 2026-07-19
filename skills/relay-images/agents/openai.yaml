@@ -1,4 +1,4 @@
 interface:
   display_name: "Relay Images"
-  short_description: "Generate or edit relay images with optional Lark delivery"
-  default_prompt: "Use $relay-images to create or edit an image through my configured relay, use Lark artifact delivery on a weak link, and save the verified result locally."
+  short_description: "Generate, edit, or cut out relay images with Lark delivery"
+  default_prompt: "Use $relay-images to create, edit, or cut out an image through my configured relay, use Lark artifact delivery on a weak link, and save the verified result locally."
